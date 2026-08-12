@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stock &amp; Options Screener</title>
+  <!-- Inline so the page makes no extra request; avoids a 404 in the console. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232a78d6'/%3E%3Cpath d='M3 11.5l3-3 2.5 2L13 5' stroke='white' stroke-width='1.8' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="masthead">
+    <div class="masthead-row">
+      <div>
+        <h1>Stock &amp; Options Screener</h1>
+        <p class="subtitle">Your watchlist, ranked by your parameters and your weights.</p>
+      </div>
+      <div class="status-block">
+        <button id="refresh-btn" class="btn-primary" type="button">Refresh Now</button>
+        <dl class="status-times">
+          <div><dt>Last refresh</dt><dd id="last-refresh">—</dd></div>
+          <div><dt>Next automatic</dt><dd id="next-refresh">—</dd></div>
+        </dl>
+      </div>
+    </div>
+
+    <p class="disclaimer" id="disclaimer" role="note">
+      Loading disclaimer…
+    </p>
+
+    <p class="scheduler-note" id="scheduler-note">
+      Automatic refreshes run inside this app, so they only happen while it is running.
+      Closing it stops the timer — there is no catch-up until you start it again.
+    </p>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab is-active" data-view="rankings" role="tab" aria-selected="true">Rankings</button>
+      <button class="tab" data-view="history" role="tab" aria-selected="false">History</button>
+      <button class="tab" data-view="settings" role="tab" aria-selected="false">Settings</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- ------------------------------------------------------ Rankings -->
+    <section id="view-rankings" class="view is-active">
+      <div id="run-banner" class="run-banner"></div>
+      <div id="rankings-body">
+        <p class="empty">Loading rankings…</p>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------- History -->
+    <section id="view-history" class="view">
+      <h2>Past rankings</h2>
+      <p class="view-intro">
+        Every refresh is stored with the exact weights and thresholds that produced it, so a
+        past ranking always shows what you actually saw that day. Forward returns are the
+        underlying's move after the ranking, adjusted for the direction that was called —
+        a put lean that fell counts as correct.
+      </p>
+      <div id="history-body"><p class="empty">Loading history…</p></div>
+    </section>
+
+    <!-- ------------------------------------------------------ Settings -->
+    <section id="view-settings" class="view">
+      <h2>Settings</h2>
+      <p class="view-intro">
+        Changes apply to the next refresh. Rankings already stored keep the configuration
+        that produced them.
+      </p>
+      <div id="settings-body"><p class="empty">Loading settings…</p></div>
+    </section>
+  </main>
+
+  <!-- --------------------------------------------------- Detail dialog -->
+  <div id="detail-overlay" class="overlay" hidden>
+    <div class="detail-panel" role="dialog" aria-modal="true" aria-labelledby="detail-title">
+      <button class="close-btn" id="detail-close" type="button" aria-label="Close">&times;</button>
+      <div id="detail-content"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

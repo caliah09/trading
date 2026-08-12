@@ -1,0 +1,14 @@
+# Runtime dependencies for the local stock/options screener.
+# Pinned to major versions that are known to work together; bump deliberately.
+
+yfinance>=0.2.40         # price/volume history, options chains, earnings dates
+pandas>=2.0              # time series handling
+numpy>=1.24              # indicator math
+fastapi>=0.110           # local REST API
+uvicorn[standard]>=0.27  # ASGI server (bound to 127.0.0.1 only)
+apscheduler>=3.10        # in-process market open/close refresh scheduler
+tzdata>=2024.1           # IANA zones on platforms without a system tz database
+
+# Development / test only
+pytest>=7.4
+httpx>=0.26              # FastAPI TestClient transport

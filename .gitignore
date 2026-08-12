@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Local data — never commit your own screener database or config
+data/
+*.sqlite
+*.sqlite3
+*.db
+config.local.json
