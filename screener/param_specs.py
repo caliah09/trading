@@ -157,9 +157,62 @@ VOLUME = ParamSpec(
     ),
 )
 
+HEAD_SHOULDERS = ParamSpec(
+    key="head_shoulders",
+    label="Head & Shoulders",
+    layer="stock",
+    default_weight=5.0,
+    summary=(
+        "Head & Shoulders (bearish) or inverse (bullish). Validity rests on a lower high "
+        "followed by a lower low — shoulder symmetry and a level neckline are confidence "
+        "factors, not requirements. Weighted moderately on purpose: the pattern predicts "
+        "excess returns in US equities but survives transaction costs only near a 60-day "
+        "hold, so it nominates candidates rather than deciding trades."
+    ),
+    thresholds=(
+        ThresholdSpec("sensitivity", "Swing sensitivity (ATR multiples)", 1.5, 0.5, 5.0, 0.1,
+                      "Retracement needed to confirm a swing point. Higher finds fewer, "
+                      "more significant pivots. Published results shift with this setting, "
+                      "so it is exposed rather than fixed."),
+        ThresholdSpec("retest_tolerance", "Neckline retest tolerance (%)", 1.5, 0.25, 10.0, 0.25,
+                      "How close to the broken neckline still counts as the pullback zone."),
+        ThresholdSpec("trend_lookback", "Trend context lookback (days)", 120.0, 20.0, 400.0, 10.0,
+                      "Window used to decide whether the pattern is a reversal or a "
+                      "continuation of an existing trend."),
+        ThresholdSpec("min_completion", "Minimum completion to score", 0.3, 0.3, 1.0, 0.1,
+                      "Patterns below this stage are reported but contribute nothing. "
+                      "0.3 forming · 0.5 at shoulder level · 0.7 neckline broken · 1.0 confirmed."),
+    ),
+)
+
 # --------------------------------------------------------------------------
 # Options layer — unsigned quality, posture-aware
 # --------------------------------------------------------------------------
+
+VOL_RISK_PREMIUM = ParamSpec(
+    key="vol_risk_premium",
+    label="Volatility risk premium",
+    layer="options",
+    default_weight=6.0,
+    summary=(
+        "The gap between implied volatility and the volatility actually realised by the "
+        "stock. Implied has historically exceeded realised by roughly 4 points, which is "
+        "what option sellers are paid for. Distinct from IV Rank: that compares IV to its "
+        "own past, this compares what you pay against what the stock actually delivers. "
+        "It carries the strongest academic support of any input in this screener."
+    ),
+    posture_aware=True,
+    thresholds=(
+        ThresholdSpec("normal_premium", "Normal premium (vol points)", 4.0, -5.0, 20.0, 0.5,
+                      "The historical average gap between implied and realised volatility. "
+                      "Scoring is measured against this, not against zero — being paid the "
+                      "usual premium is par, not an edge."),
+        ThresholdSpec("width", "Transition width (vol points)", 6.0, 1.0, 25.0, 0.5,
+                      "Vol points past the normal premium that reach ~88% strength."),
+        ThresholdSpec("rv_window", "Realised-vol window (days)", 21.0, 5.0, 90.0, 1.0,
+                      "Lookback for the realised volatility that implied is compared against."),
+    ),
+)
 
 IV_RANK = ParamSpec(
     key="iv_rank",
@@ -246,8 +299,8 @@ EARNINGS = ParamSpec(
 
 
 ALL_SPECS: tuple[ParamSpec, ...] = (
-    RSI, MA_CROSS, MACD, MA200, VOLUME,
-    IV_RANK, DTE_FIT, DELTA_FIT, EARNINGS,
+    RSI, MA_CROSS, MACD, MA200, VOLUME, HEAD_SHOULDERS,
+    IV_RANK, VOL_RISK_PREMIUM, DTE_FIT, DELTA_FIT, EARNINGS,
 )
 
 SPECS_BY_KEY: dict[str, ParamSpec] = {s.key: s for s in ALL_SPECS}

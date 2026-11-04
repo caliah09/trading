@@ -1,0 +1,1 @@
+"""Chart pattern detection."""

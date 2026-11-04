@@ -373,3 +373,166 @@ def test_every_result_carries_an_explanation(config):
         result = scorer(data, config)
         assert result.explanation, f"{result.key} produced no explanation"
         assert len(result.explanation) > 20
+
+
+# ==========================================================================
+# Head & Shoulders
+# ==========================================================================
+
+class TestHeadShouldersScorer:
+    def _data(self, waypoints):
+        from tests.test_pivots import build_closes
+
+        return data_for(build_closes(waypoints))
+
+    def test_bearish_pattern_gives_a_negative_signal(self, config):
+        from tests.test_head_shoulders import BEARISH
+
+        result = P.score_head_shoulders(self._data(BEARISH), config)
+        assert result.status == "ok"
+        assert result.signal < -0.4
+        assert "bearish" in result.display_value
+
+    def test_bullish_pattern_gives_a_positive_signal(self, config):
+        from tests.test_head_shoulders import BULLISH
+
+        result = P.score_head_shoulders(self._data(BULLISH), config)
+        assert result.signal > 0.4
+        assert "bullish" in result.display_value
+
+    def test_signal_is_bounded(self, config):
+        from tests.test_head_shoulders import BEARISH, BULLISH
+
+        for waypoints in (BEARISH, BULLISH):
+            result = P.score_head_shoulders(self._data(waypoints), config)
+            assert -1.0 <= result.signal <= 1.0
+
+    def test_explanation_leads_with_price_action_not_geometry(self, config):
+        """The method's core claim must be visible in the reasoning text."""
+        from tests.test_head_shoulders import BEARISH
+
+        result = P.score_head_shoulders(self._data(BEARISH), config)
+        assert "lower high" in result.explanation
+        assert "symmetry" in result.explanation
+
+    def test_cites_the_research_backed_hold_period(self, config):
+        from tests.test_head_shoulders import BEARISH
+
+        result = P.score_head_shoulders(self._data(BEARISH), config)
+        assert "60" in result.explanation
+        assert result.detail["expected_hold_days"] == 60
+
+    def test_forming_pattern_scores_below_a_confirmed_one(self, config):
+        from tests.test_head_shoulders import BEARISH, BEARISH_FORMING
+
+        confirmed = P.score_head_shoulders(self._data(BEARISH), config)
+        forming = P.score_head_shoulders(self._data(BEARISH_FORMING), config)
+        if forming.status == "ok" and forming.signal is not None:
+            assert abs(forming.signal) < abs(confirmed.signal)
+
+    def test_min_completion_gates_contribution_without_hiding_the_pattern(self, config):
+        from tests.test_head_shoulders import BEARISH_FORMING
+
+        strict = ScreenerConfig()
+        strict.parameters["head_shoulders"].thresholds["min_completion"] = 1.0
+        result = P.score_head_shoulders(self._data(BEARISH_FORMING), strict)
+        assert result.status == "ok"
+        assert result.signal == 0.0
+        assert "contributes nothing" in result.explanation
+
+    def test_no_pattern_explains_itself(self, config):
+        result = P.score_head_shoulders(data_for(trending(200, daily_pct=0.4)), config)
+        assert result.status == "insufficient_data"
+        assert result.explanation
+
+    def test_short_history_is_insufficient(self, config):
+        result = P.score_head_shoulders(data_for([100.0] * 30), config)
+        assert result.status == "insufficient_data"
+        assert "60" in result.explanation
+
+    def test_sensitivity_is_honoured(self, config):
+        """Pivot sensitivity is exposed because results genuinely move with it."""
+        from tests.test_head_shoulders import BEARISH
+
+        coarse = ScreenerConfig()
+        coarse.parameters["head_shoulders"].thresholds["sensitivity"] = 9.0
+        result = P.score_head_shoulders(self._data(BEARISH), coarse)
+        assert result.status == "insufficient_data"
+        assert "sensitivity" in result.explanation
+
+
+# ==========================================================================
+# Volatility risk premium
+# ==========================================================================
+
+def noisy_closes(n: int = 160, sigma: float = 0.02, seed: int = 4) -> list[float]:
+    """A random walk with real volatility.
+
+    `trending()` is a perfectly smooth geometric path whose realised volatility
+    is exactly zero, which makes every implied volatility look like a rich
+    premium. Any test about the IV-minus-RV spread needs a series that moves.
+    sigma=0.02 daily annualises to roughly 32%.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    return list(100.0 * np.exp(np.cumsum(rng.normal(0.0005, sigma, n))))
+
+
+class TestVolRiskPremium:
+    def _data(self, atm_iv):
+        return data_for(noisy_closes(), options=assessment_with(atm_iv=atm_iv))
+
+    def test_selling_rewards_a_wide_premium(self):
+        selling = ScreenerConfig(posture="sell")
+        rich = P.score_vol_risk_premium(self._data(0.80), selling)
+        thin = P.score_vol_risk_premium(self._data(0.05), selling)
+        assert rich.signal > thin.signal
+        assert "being paid more" in rich.explanation
+
+    def test_buying_rewards_a_narrow_premium(self):
+        buying = ScreenerConfig(posture="buy")
+        cheap = P.score_vol_risk_premium(self._data(0.05), buying)
+        pricey = P.score_vol_risk_premium(self._data(0.80), buying)
+        assert cheap.signal > pricey.signal
+        assert "paying less" in cheap.explanation
+
+    def test_posture_inverts_the_score(self):
+        data_iv = 0.80
+        buying = P.score_vol_risk_premium(self._data(data_iv), ScreenerConfig(posture="buy"))
+        selling = P.score_vol_risk_premium(self._data(data_iv), ScreenerConfig(posture="sell"))
+        assert (buying.signal < 0.5) != (selling.signal < 0.5)
+
+    def test_signal_is_unsigned(self, config):
+        result = P.score_vol_risk_premium(self._data(0.3), config)
+        assert 0.0 <= result.signal <= 1.0
+
+    def test_measured_against_the_normal_premium_not_zero(self, config):
+        """Collecting the usual ~4 points is par, so it should score near 0.5."""
+        selling = ScreenerConfig(posture="sell")
+        realised = indicators_realised(noisy_closes())
+        at_par = (realised + selling.threshold("vol_risk_premium", "normal_premium")) / 100.0
+        result = P.score_vol_risk_premium(self._data(at_par), selling)
+        assert 0.4 < result.signal < 0.6
+
+    def test_reports_both_volatilities(self, config):
+        result = P.score_vol_risk_premium(self._data(0.3), config)
+        assert "implied_vol" in result.detail
+        assert "realised_vol" in result.detail
+        assert result.detail["spread"] == pytest.approx(
+            result.detail["implied_vol"] - result.detail["realised_vol"], abs=0.02)
+
+    def test_missing_implied_volatility_is_insufficient(self, config):
+        data = data_for(trending(120), options=assessment_with(atm_iv=None))
+        assert P.score_vol_risk_premium(data, config).status == "insufficient_data"
+
+    def test_short_history_is_insufficient(self, config):
+        data = data_for([100.0] * 8, options=assessment_with(atm_iv=0.3))
+        assert P.score_vol_risk_premium(data, config).status == "insufficient_data"
+
+
+def indicators_realised(closes, window=21):
+    from screener import indicators
+    from tests.conftest import make_series
+
+    return float(indicators.realised_volatility(make_series(closes), window).dropna().iloc[-1])

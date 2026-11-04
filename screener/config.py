@@ -27,6 +27,53 @@ class ConfigError(ValueError):
     """Raised when a configuration is structurally invalid."""
 
 
+#: Named weight sets. These are opinions, and they are kept side by side rather
+#: than collapsed into one default so the reasoning behind each stays visible.
+#:
+#: ``technicals_led``  — chart signal decides direction, options layer refines it.
+#: ``evidence_led``    — weighted by strength of published evidence. The
+#:                       volatility inputs carry the most support (Carr & Wu;
+#:                       Coval & Shumway), chart patterns much less, so this
+#:                       preset inverts the usual retail emphasis.
+#: ``flat``            — every parameter at 5; no embedded opinion at all.
+#:
+#: See docs/research/evidence-review.md for what backs the evidence_led numbers.
+WEIGHT_PRESETS: dict[str, dict[str, float]] = {
+    "technicals_led": {
+        "rsi": 8.0, "macd": 7.0, "ma_cross": 7.0, "ma200": 6.0,
+        "volume": 5.0, "head_shoulders": 5.0,
+        "iv_rank": 6.0, "vol_risk_premium": 6.0,
+        "delta_fit": 5.0, "dte_fit": 4.0, "earnings": 4.0,
+    },
+    "evidence_led": {
+        # Volatility first: the only inputs here with peer-reviewed support.
+        "vol_risk_premium": 9.0, "iv_rank": 8.0, "earnings": 6.0,
+        # Trend regime is robust; oscillators are weaker.
+        "ma200": 5.0, "head_shoulders": 5.0,
+        "rsi": 4.0, "macd": 4.0, "ma_cross": 4.0, "volume": 3.0,
+        "delta_fit": 5.0, "dte_fit": 4.0,
+    },
+    "flat": {
+        "rsi": 5.0, "macd": 5.0, "ma_cross": 5.0, "ma200": 5.0,
+        "volume": 5.0, "head_shoulders": 5.0, "iv_rank": 5.0,
+        "vol_risk_premium": 5.0, "delta_fit": 5.0, "dte_fit": 5.0, "earnings": 5.0,
+    },
+}
+
+PRESET_DESCRIPTIONS = {
+    "technicals_led": (
+        "The chart decides direction, the options layer refines how to express it. "
+        "This is the conventional retail emphasis."
+    ),
+    "evidence_led": (
+        "Weighted by how well each input is supported in published research. The "
+        "volatility inputs lead because they have peer-reviewed backing; chart "
+        "patterns are demoted to candidate nomination."
+    ),
+    "flat": "Every parameter at 5 — discover your own preferences from a neutral start.",
+}
+
+
 @dataclass
 class ParameterConfig:
     """User-controlled settings for a single scoring parameter."""
@@ -140,6 +187,40 @@ class ScreenerConfig:
     def target(self) -> ContractTarget:
         """The contract target for the currently selected posture."""
         return self.buy_target if self.posture == "buy" else self.sell_target
+
+    def apply_preset(self, name: str) -> "ScreenerConfig":
+        """Return a copy with weights replaced by a named preset.
+
+        Thresholds, watchlist, posture and contract targets are untouched — a
+        preset is only an opinion about relative importance, not a whole config.
+        Parameters absent from the preset keep their current weight.
+        """
+        if name not in WEIGHT_PRESETS:
+            raise ConfigError(
+                f"Unknown weight preset {name!r}. Available: {sorted(WEIGHT_PRESETS)}"
+            )
+        updated = {
+            key: ParameterConfig(
+                weight=WEIGHT_PRESETS[name].get(key, pc.weight),
+                enabled=True if key in WEIGHT_PRESETS[name] else pc.enabled,
+                thresholds=dict(pc.thresholds),
+            )
+            for key, pc in self.parameters.items()
+        }
+        data = self.to_dict()
+        data["parameters"] = {
+            k: {"weight": v.weight, "enabled": v.enabled, "thresholds": v.thresholds}
+            for k, v in updated.items()
+        }
+        return ScreenerConfig.from_dict(data)
+
+    def matching_preset(self) -> str | None:
+        """The preset name whose weights match this config exactly, if any."""
+        current = {k: pc.weight for k, pc in self.parameters.items()}
+        for name, weights in WEIGHT_PRESETS.items():
+            if all(current.get(k) == w for k, w in weights.items()):
+                return name
+        return None
 
     def active(self, key: str) -> bool:
         pc = self.parameters[key]

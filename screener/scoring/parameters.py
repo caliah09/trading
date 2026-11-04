@@ -32,6 +32,8 @@ from screener.config import ScreenerConfig
 from screener.market_calendar import trading_days_between
 from screener.options_analysis import OptionsAssessment
 from screener.param_specs import spec
+from screener.patterns.head_shoulders import EXPECTED_HOLD_DAYS, detect_head_shoulders
+from screener.pivots import find_pivots
 from screener.scoring.ramps import ramp01, signed_ramp, soft_sign, window_fit
 
 Status = Literal["ok", "insufficient_data", "not_applicable", "disabled"]
@@ -371,9 +373,162 @@ def score_volume(data: TickerData, config: ScreenerConfig) -> ParameterResult:
     )
 
 
+def score_head_shoulders(data: TickerData, config: ScreenerConfig) -> ParameterResult:
+    key = "head_shoulders"
+    weight = config.parameters[key].weight
+
+    sensitivity = config.threshold(key, "sensitivity")
+    retest_tolerance = config.threshold(key, "retest_tolerance")
+    trend_lookback = int(config.threshold(key, "trend_lookback"))
+    min_completion = config.threshold(key, "min_completion")
+
+    if data.bar_count < 60:
+        return _missing(key, weight,
+                        f"Only {data.bar_count} sessions of history; pattern detection needs "
+                        "at least 60 to find enough swing points.")
+
+    pivots = find_pivots(data.prices, sensitivity=sensitivity)
+    if len(pivots) < 5:
+        return _missing(key, weight,
+                        f"Only {len(pivots)} confirmed swing point(s) at your {sensitivity:.1f}x ATR "
+                        "sensitivity — a Head & Shoulders needs five. Lower the sensitivity to "
+                        "detect smaller swings.")
+
+    pattern = detect_head_shoulders(
+        data.prices, pivots,
+        retest_tolerance_pct=retest_tolerance,
+        trend_lookback=trend_lookback,
+    )
+    if pattern is None:
+        return _missing(key, weight,
+                        f"No valid Head & Shoulders in the last {len(pivots)} swing points. The "
+                        "shape requires a middle extreme higher (or lower) than both shoulders; "
+                        "nothing here qualifies.")
+
+    if pattern.completion < min_completion:
+        return ParameterResult(
+            key=key, label=spec(key).label, layer="stock", status="ok", weight=weight,
+            signal=0.0, raw_value=pattern.completion,
+            display_value=f"{pattern.direction} · {pattern.state}",
+            explanation=(
+                f"A {pattern.direction} Head & Shoulders is {pattern.state}, which is below your "
+                f"minimum completion of {min_completion:.1f}. It is shown for awareness but "
+                "contributes nothing to the score."
+            ),
+            detail=pattern.to_dict(),
+        )
+
+    # Completion carries the price-action weight; quality only modulates it, so
+    # an asymmetric but confirmed pattern still scores well.
+    signal = pattern.sign * pattern.completion * (0.6 + 0.4 * pattern.quality)
+
+    lean = "bearish" if pattern.direction == "bearish" else "bullish"
+    structure = ("lower high followed by a lower low" if pattern.direction == "bearish"
+                 else "higher low followed by a higher high")
+
+    if pattern.completion >= 1.0:
+        headline = (f"A {lean} Head & Shoulders is complete — the neckline broke and the "
+                    f"confirming {structure.split(' followed by a ')[1]} printed.")
+    elif pattern.completion >= 0.7:
+        headline = f"A {lean} Head & Shoulders has broken its neckline but is not yet confirmed."
+    elif pattern.completion >= 0.5:
+        headline = (f"A {lean} Head & Shoulders has price back at the right-shoulder level, "
+                    "the aggressive early-entry zone.")
+    else:
+        headline = f"A {lean} Head & Shoulders is forming; the neckline is untested."
+
+    parts = [
+        headline,
+        f"The pattern rests on a {structure}, which is what makes it valid — "
+        f"symmetry here is {pattern.symmetry * 100:.0f}% and is only a confidence factor.",
+    ]
+    parts.extend(pattern.notes)
+    if pattern.target is not None:
+        parts.append(
+            f"The measured move projects roughly {pattern.target:,.2f}. Research puts this "
+            f"pattern's cost-surviving edge near a {EXPECTED_HOLD_DAYS}-trading-day hold, so an "
+            "expiry shorter than that is trading a horizon the evidence does not support."
+        )
+
+    return ParameterResult(
+        key=key, label=spec(key).label, layer="stock", status="ok", weight=weight,
+        signal=signal, raw_value=pattern.completion,
+        display_value=f"{pattern.direction} · {pattern.state}",
+        explanation=" ".join(parts),
+        detail=pattern.to_dict(),
+    )
+
+
 # ==========================================================================
 # Options layer — unsigned quality, posture-aware
 # ==========================================================================
+
+def score_vol_risk_premium(data: TickerData, config: ScreenerConfig) -> ParameterResult:
+    key = "vol_risk_premium"
+    weight = config.parameters[key].weight
+
+    atm_iv = data.options.atm_iv if data.options else None
+    if atm_iv is None:
+        return _missing(key, weight,
+                        "No at-the-money implied volatility was available, so there is nothing "
+                        "to compare against realised volatility.")
+
+    rv_window = int(config.threshold(key, "rv_window"))
+    if data.bar_count < rv_window + 2:
+        return _missing(key, weight,
+                        f"Only {data.bar_count} sessions of history; a {rv_window}-day realised "
+                        "volatility needs more.")
+
+    realised = indicators.realised_volatility(data.close, rv_window).dropna()
+    if realised.empty:
+        return _missing(key, weight, "Realised volatility could not be computed.")
+
+    realised_vol = float(realised.iloc[-1])      # already a percentage
+    implied_vol = float(atm_iv) * 100.0
+    spread = implied_vol - realised_vol          # vol points
+
+    normal = config.threshold(key, "normal_premium")
+    width = config.threshold(key, "width")
+    buying = config.posture == "buy"
+
+    # Measured against the historical premium, not against zero: collecting the
+    # usual 4 points is par, and paying it is the normal cost of being long.
+    signal = ramp01(spread, normal, width, rising=not buying)
+
+    basis = (f"Implied volatility is {implied_vol:.1f}% against {realised_vol:.1f}% realised over "
+             f"{rv_window} sessions — a spread of {spread:+.1f} points versus a typical {normal:.1f}.")
+
+    if buying:
+        if spread < normal:
+            meaning = ("You are paying less than the usual premium for exposure to a stock that "
+                       "has been moving more than its options imply. That is the favourable side "
+                       "of this trade for a buyer.")
+        else:
+            meaning = ("You are paying above the usual premium relative to how much the stock has "
+                       "actually been moving. The direction has to be right by more than normal "
+                       "just to cover the volatility you are overpaying for.")
+    else:
+        if spread > normal:
+            meaning = ("You are being paid more than the usual premium relative to how much the "
+                       "stock has actually moved. This is the gap option sellers earn, and it is "
+                       "wider than its historical norm here.")
+        else:
+            meaning = ("You are being paid less than the usual premium for the risk taken on. The "
+                       "stock has been moving nearly as much as its options imply, so there is "
+                       "little cushion.")
+
+    return ParameterResult(
+        key=key, label=spec(key).label, layer="options", status="ok", weight=weight,
+        signal=signal, raw_value=spread, display_value=f"{spread:+.1f}pts",
+        explanation=f"{basis} {meaning}",
+        detail={
+            "implied_vol": round(implied_vol, 2),
+            "realised_vol": round(realised_vol, 2),
+            "spread": round(spread, 2),
+            "normal_premium": normal,
+            "posture": config.posture,
+        },
+    )
 
 def compute_iv_rank(data: TickerData, config: ScreenerConfig) -> tuple[float | None, str, int]:
     """Return ``(iv_rank, source, observation_count)``.
@@ -605,10 +760,12 @@ STOCK_SCORERS = {
     "macd": score_macd,
     "ma200": score_ma200,
     "volume": score_volume,
+    "head_shoulders": score_head_shoulders,
 }
 
 OPTIONS_SCORERS = {
     "iv_rank": score_iv_rank,
+    "vol_risk_premium": score_vol_risk_premium,
     "dte_fit": score_dte_fit,
     "delta_fit": score_delta_fit,
     "earnings": score_earnings,

@@ -255,3 +255,70 @@ class TestWeb:
     def test_serves_static_assets(self, client):
         assert client.get("/static/app.js").status_code == 200
         assert client.get("/static/styles.css").status_code == 200
+
+
+class TestPresets:
+    def test_lists_presets_with_descriptions(self, client):
+        body = client.get("/api/presets").json()
+        names = {p["name"] for p in body["presets"]}
+        assert {"technicals_led", "evidence_led", "flat"} <= names
+        assert all(p["description"] for p in body["presets"])
+
+    def test_reports_the_current_preset(self, client):
+        assert client.get("/api/presets").json()["current"] == "technicals_led"
+
+    def test_applying_a_preset_changes_weights(self, client):
+        before = client.get("/api/config").json()["config"]["parameters"]
+        assert before["rsi"]["weight"] == 8.0
+
+        response = client.post("/api/presets/evidence_led")
+        assert response.status_code == 200
+
+        after = client.get("/api/config").json()["config"]["parameters"]
+        assert after["rsi"]["weight"] == 4.0
+        assert after["vol_risk_premium"]["weight"] == 9.0
+        assert client.get("/api/presets").json()["current"] == "evidence_led"
+
+    def test_preset_leaves_watchlist_and_posture_alone(self, client):
+        config = client.get("/api/config").json()["config"]
+        config["watchlist"] = ["NVDA", "TSLA"]
+        config["posture"] = "sell"
+        client.put("/api/config", json=config)
+
+        client.post("/api/presets/evidence_led")
+        after = client.get("/api/config").json()["config"]
+        assert after["watchlist"] == ["NVDA", "TSLA"]
+        assert after["posture"] == "sell"
+
+    def test_unknown_preset_404(self, client):
+        assert client.post("/api/presets/galaxy_brain").status_code == 404
+
+
+class TestConcentration:
+    def test_reports_independent_positions(self, seeded_client):
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        body = seeded_client.get(f"/api/rankings/{run_id}/concentration").json()
+        assert body["available"] is True
+        assert body["nominal_positions"] >= 1
+        assert 1 <= body["effective_positions"] <= body["nominal_positions"]
+        assert isinstance(body["clusters"], list)
+
+    def test_route_is_not_shadowed_by_the_ticker_route(self, seeded_client):
+        """Regression: /{run_id}/{symbol} must not swallow 'concentration'."""
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        response = seeded_client.get(f"/api/rankings/{run_id}/concentration")
+        assert response.status_code == 200
+        assert "effective_positions" in response.json()
+
+    def test_top_n_is_overridable(self, seeded_client):
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        body = seeded_client.get(f"/api/rankings/{run_id}/concentration?top_n=2").json()
+        assert body["nominal_positions"] == 2
+
+    def test_includes_directional_split(self, seeded_client):
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        body = seeded_client.get(f"/api/rankings/{run_id}/concentration").json()
+        assert sum(body["directional_split"].values()) == body["nominal_positions"]
+
+    def test_unknown_run_404(self, client):
+        assert client.get("/api/rankings/999/concentration").status_code == 404

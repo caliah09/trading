@@ -21,10 +21,17 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from screener.config import ConfigError, ScreenerConfig, normalise_watchlist
+from screener.config import (
+    PRESET_DESCRIPTIONS,
+    WEIGHT_PRESETS,
+    ConfigError,
+    ScreenerConfig,
+    normalise_watchlist,
+)
 from screener.db import DEFAULT_DB_PATH, Database
 from screener.param_specs import ALL_SPECS
 from screener.performance import HORIZONS, summarise_run_performance
+from screener.portfolio import DEFAULT_WINDOW, analyse_concentration
 from screener.scheduler import RefreshBusy, RefreshService
 
 log = logging.getLogger(__name__)
@@ -151,6 +158,38 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"No run with id {run_id}")
         return _ranking_payload(db, run)
 
+    # NOTE: this must stay registered BEFORE /api/rankings/{run_id}/{symbol}.
+    # FastAPI matches routes in declaration order, so the ticker route would
+    # otherwise swallow "concentration" as a symbol name and return 404.
+    @app.get("/api/rankings/{run_id}/concentration")
+    def concentration(run_id: int, top_n: int | None = Query(None, ge=1, le=50)) -> dict:
+        """How many independent bets the top candidates actually represent.
+
+        The ranking scores each ticker in isolation, so it cannot see that its
+        leaders move together. This is the portfolio-level view that gap leaves
+        out — see ``screener.portfolio``.
+        """
+        run = db.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"No run with id {run_id}")
+
+        entries = db.get_ranking(run_id)
+        if not entries:
+            return {"available": False, "message": "This run stored no ranking."}
+
+        stored = db.get_config_snapshot(run["fingerprint"]) or {}
+        limit = top_n or int(stored.get("top_n", db.load_active_config().top_n))
+        candidates = [e for e in entries if e["rank"] <= limit]
+        symbols = [e["symbol"] for e in candidates]
+        directions = {e["symbol"]: e["direction"] for e in candidates}
+
+        prices = {s: db.get_prices(s, limit=DEFAULT_WINDOW * 3) for s in symbols}
+        report = analyse_concentration(prices, symbols, directions=directions)
+        payload = report.to_dict()
+        payload["available"] = True
+        payload["run_id"] = run_id
+        return payload
+
     @app.get("/api/rankings/{run_id}/{symbol}")
     def ticker_detail(run_id: int, symbol: str) -> dict:
         """Full parameter-by-parameter breakdown for one ticker in one run."""
@@ -225,6 +264,37 @@ def create_app(
             "fingerprint": config.fingerprint,
             "note": ("Saved. The new weights apply to the next refresh; rankings already "
                      "stored keep the configuration that produced them."),
+        }
+
+    @app.get("/api/presets")
+    def presets() -> dict:
+        """Named weight sets, with the one currently in use marked."""
+        config = db.load_active_config()
+        return {
+            "current": config.matching_preset(),
+            "presets": [
+                {
+                    "name": name,
+                    "description": PRESET_DESCRIPTIONS.get(name, ""),
+                    "weights": weights,
+                }
+                for name, weights in WEIGHT_PRESETS.items()
+            ],
+        }
+
+    @app.post("/api/presets/{name}")
+    def apply_preset(name: str) -> dict:
+        """Replace the active weights with a preset, leaving everything else alone."""
+        try:
+            updated = db.load_active_config().apply_preset(name)
+        except ConfigError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        db.save_active_config(updated)
+        return {
+            "config": updated.to_dict(),
+            "fingerprint": updated.fingerprint,
+            "preset": name,
+            "note": f"Weights set to '{name}'. Refresh to re-rank under them.",
         }
 
     # ---------------------------------------------------------------- web

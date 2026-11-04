@@ -162,3 +162,54 @@ class TestRoundTrip:
         selling = ScreenerConfig(posture="sell")
         assert buying.target().delta_low == buying.buy_target.delta_low
         assert selling.target().delta_low == selling.sell_target.delta_low
+
+
+class TestWeightPresets:
+    def test_default_config_matches_technicals_led(self):
+        assert ScreenerConfig().matching_preset() == "technicals_led"
+
+    def test_apply_changes_weights(self):
+        config = ScreenerConfig().apply_preset("evidence_led")
+        assert config.parameters["vol_risk_premium"].weight == 9.0
+        assert config.parameters["rsi"].weight == 4.0
+
+    def test_evidence_led_ranks_volatility_above_patterns(self):
+        """The whole point of the preset — check it actually encodes that."""
+        config = ScreenerConfig().apply_preset("evidence_led")
+        volatility = config.parameters["vol_risk_premium"].weight
+        for pattern_key in ("rsi", "macd", "ma_cross", "head_shoulders"):
+            assert volatility > config.parameters[pattern_key].weight
+
+    def test_apply_preserves_thresholds(self):
+        config = ScreenerConfig()
+        config.parameters["rsi"].thresholds["oversold"] = 22.0
+        applied = config.apply_preset("evidence_led")
+        assert applied.threshold("rsi", "oversold") == 22.0
+
+    def test_apply_preserves_watchlist_and_posture(self):
+        config = ScreenerConfig(watchlist=["NVDA"], posture="sell", top_n=3)
+        applied = config.apply_preset("flat")
+        assert applied.watchlist == ["NVDA"]
+        assert applied.posture == "sell"
+        assert applied.top_n == 3
+
+    def test_round_trip_is_recognised(self):
+        for name in ("technicals_led", "evidence_led", "flat"):
+            assert ScreenerConfig().apply_preset(name).matching_preset() == name
+
+    def test_unknown_preset_raises(self):
+        with pytest.raises(ConfigError, match="Unknown weight preset"):
+            ScreenerConfig().apply_preset("nope")
+
+    def test_every_preset_covers_every_parameter(self):
+        from screener.config import WEIGHT_PRESETS
+
+        keys = {s.key for s in ALL_SPECS}
+        for name, weights in WEIGHT_PRESETS.items():
+            assert set(weights) == keys, f"preset {name} is missing parameters"
+
+    def test_every_preset_is_valid(self):
+        from screener.config import WEIGHT_PRESETS
+
+        for name in WEIGHT_PRESETS:
+            ScreenerConfig().apply_preset(name).validate()

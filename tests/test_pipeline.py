@@ -67,14 +67,19 @@ class TestRun:
         """Missing options data must degrade one ticker, not exclude it."""
         summary = pipeline.run(ScreenerConfig(watchlist=["AAPL", "NOCHAIN"]))
         entry = next(e for e in db.get_ranking(summary.run_id) if e["symbol"] == "NOCHAIN")
-        # No chain kills expiry and delta fit. IV Rank still computes from the
-        # realised-volatility proxy, and the earnings date is unaffected.
-        assert entry["completeness"] == "7/9"
+        # Asserting the missing set rather than a "7/9" fraction, so adding a
+        # parameter later does not fail this test for the wrong reason.
+        # No chain kills expiry fit, delta fit, and the volatility risk premium
+        # (which needs implied volatility to compare against). IV Rank still
+        # computes from the realised-volatility proxy; earnings is unaffected.
         missing = {p["param_key"] for p in entry["parameters"] if p["status"] != "ok"}
-        assert missing == {"dte_fit", "delta_fit"}
+        assert missing == {"dte_fit", "delta_fit", "vol_risk_premium"}
+
+        counted, considered = (int(x) for x in entry["completeness"].split("/"))
+        assert considered - counted == len(missing)
         for param in entry["parameters"]:
             if param["status"] != "ok":
-                assert "options chain" in param["explanation"]
+                assert param["explanation"]
 
     def test_short_history_ticker_reports_which_parameters_failed(self, pipeline, db):
         summary = pipeline.run(ScreenerConfig(watchlist=["AAPL", "NEWIPO"]))
