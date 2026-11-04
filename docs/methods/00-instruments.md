@@ -56,25 +56,52 @@ and in a choppy market it loses value even when the underlying ends flat.
 
 ### The approximate size of it
 
-For a fund with leverage `L` and underlying annualised volatility `σ`, the
-expected drag on log return is roughly:
+> **Corrected 2026-11-04 after the evidence review.** The volatility term below
+> is only part of the cost, and not the larger part. See the friction section
+> immediately after it.
+
+**Component 1 — rebalancing drag.** For a fund with leverage `L` and underlying
+annualised volatility `σ`, the expected drag on log return is roughly:
 
 ```
 drag ≈ ((L² − L) / 2) × σ²     per year
 ```
 
-For `L = 3` that is `3σ²` per year. Concretely:
+For `L = 3` that is `3σ²` per year:
 
-| Underlying annualised vol | Expected drag per year | Per month |
+| Underlying annualised vol | Rebalancing drag/year | Per month |
 |---|---|---|
 | 20% | ~12% | ~1.0% |
 | 30% | ~27% | ~2.3% |
 | 50% | ~75% | ~6.3% |
 | 60% | ~108% | ~9.0% |
 
-*(Continuous-rebalancing approximation. Excludes the ~0.9–1.0% expense ratio
-most 3× funds charge, and excludes embedded financing cost, both of which add
-to it.)*
+**Component 2 — frictions, which are larger.** Bessembinder (2026), studying 235
+levered single-stock ETFs, decomposes total underperformance as:
+
+| Component | Per month |
+|---|---|
+| Daily rebalancing | ~0.42% |
+| Fees, trading costs, excess loan margins | ~1.04% |
+| **Total** | **~1.47%** |
+
+Frictions are roughly **2.5× the rebalancing drag**. A model using the `3σ²`
+term alone — which is what this document originally said — understates true cost
+by more than half.
+
+Two refinements from the same work:
+- Underperformance is driven by **return reversals**, not volatility as such.
+  Choppy, mean-reverting tape is the killer; a sustained trend is survivable.
+- Worked example: **TQQQ returned +33.2% in 2025 while 3× QQQ returned +60.5%.**
+
+**Scope caveat:** Bessembinder studied *single-stock* levered ETFs, which carry
+higher fees and worse borrow than broad index 3× funds. Do not apply 1.47%/month
+to TQQQ directly. The structural point — frictions exceed rebalancing drag —
+carries over; the magnitude does not.
+
+**Implementation:** model drag as `rebalancing(σ, L) + friction(expense_ratio,
+borrow)`, and treat the friction term as the dominant one. Do not ship a
+volatility-only model.
 
 ### Why this collides with these two methods specifically
 
