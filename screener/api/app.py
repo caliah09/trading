@@ -29,10 +29,12 @@ from screener.config import (
     normalise_watchlist,
 )
 from screener.db import DEFAULT_DB_PATH, Database
+from screener.journal import DEFAULT_HORIZON, calibrate
 from screener.param_specs import ALL_SPECS
 from screener.performance import HORIZONS, summarise_run_performance
 from screener.portfolio import DEFAULT_WINDOW, analyse_concentration
 from screener.scheduler import RefreshBusy, RefreshService
+from screener.tickets import build_ticket
 
 log = logging.getLogger(__name__)
 
@@ -296,6 +298,86 @@ def create_app(
             "preset": name,
             "note": f"Weights set to '{name}'. Refresh to re-rank under them.",
         }
+
+    # ------------------------------------------------------------ tickets
+
+    @app.get("/api/rankings/{run_id}/{symbol}/ticket")
+    def ticket(run_id: int, symbol: str,
+               instrument: str = Query("auto",
+                                       pattern="^(auto|option|equity|leveraged_etf)$")) -> dict:
+        """A reviewable order ticket for one candidate. Places nothing."""
+        wanted = symbol.strip().upper()
+        entry = next((e for e in db.get_ranking(run_id) if e["symbol"] == wanted), None)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"{wanted} is not in run {run_id}")
+
+        config = db.load_active_config()
+        built = build_ticket(entry, instrument=instrument,
+                             risk_free_rate=config.risk_free_rate, run_id=run_id)
+        return {
+            "ticket": built.to_dict(),
+            "text": built.to_text(),
+            "disclaimer": DISCLAIMER,
+        }
+
+    # ----------------------------------------------------------- decisions
+
+    @app.get("/api/decisions")
+    def list_decisions(run_id: int | None = None,
+                       limit: int = Query(500, ge=1, le=5000)) -> dict:
+        return {"decisions": db.get_decisions(run_id=run_id, limit=limit)}
+
+    @app.post("/api/decisions")
+    def record_decision(payload: dict[str, Any] = Body(...)) -> dict:
+        """Record what you did about a candidate: taken, passed, or watching.
+
+        This is the only input the screener cannot generate for itself, and it
+        is what lets the weights be measured rather than assumed.
+        """
+        try:
+            run_id = int(payload["run_id"])
+            symbol = str(payload["symbol"]).strip().upper()
+            decision = str(payload["decision"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"run_id, symbol and decision are required: {exc}",
+            ) from exc
+
+        if db.get_run(run_id) is None:
+            raise HTTPException(status_code=404, detail=f"No run with id {run_id}")
+
+        entry = next((e for e in db.get_ranking(run_id) if e["symbol"] == symbol), None)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"{symbol} is not in run {run_id}")
+
+        try:
+            db.record_decision(
+                run_id, symbol, decision,
+                note=payload.get("note"),
+                instrument=payload.get("instrument"),
+                contract=payload.get("contract"),
+                entry_price=payload.get("entry_price"),
+                quantity=payload.get("quantity"),
+                composite=entry["composite"],
+                direction=entry["direction"],
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return {"ok": True, "run_id": run_id, "symbol": symbol, "decision": decision}
+
+    @app.delete("/api/decisions/{run_id}/{symbol}")
+    def delete_decision(run_id: int, symbol: str) -> dict:
+        removed = db.delete_decision(run_id, symbol.strip().upper())
+        if not removed:
+            raise HTTPException(status_code=404, detail="No such decision")
+        return {"ok": True}
+
+    @app.get("/api/calibration")
+    def calibration(horizon_days: int = Query(DEFAULT_HORIZON, ge=1, le=250)) -> dict:
+        """Measure the screener against the decisions recorded against it."""
+        return calibrate(db, horizon_days=horizon_days).to_dict()
 
     # ---------------------------------------------------------------- web
 

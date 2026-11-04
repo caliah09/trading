@@ -36,6 +36,7 @@
     <nav class="tabs" role="tablist">
       <button class="tab is-active" data-view="rankings" role="tab" aria-selected="true">Rankings</button>
       <button class="tab" data-view="history" role="tab" aria-selected="false">History</button>
+      <button class="tab" data-view="journal" role="tab" aria-selected="false">Journal</button>
       <button class="tab" data-view="settings" role="tab" aria-selected="false">Settings</button>
     </nav>
   </header>
@@ -59,6 +60,19 @@
         a put lean that fell counts as correct.
       </p>
       <div id="history-body"><p class="empty">Loading history…</p></div>
+    </section>
+
+    <!-- ------------------------------------------------------- Journal -->
+    <section id="view-journal" class="view">
+      <h2>Decision journal</h2>
+      <p class="view-intro">
+        The screener can work out what every ticker did next. What it cannot know is which
+        candidates you acted on — and that is the one input that turns these weights from
+        opinions into measurements. Mark <strong>Taken</strong>, <strong>Passed</strong> or
+        <strong>Watching</strong> on any ticker, and once the horizon elapses this page
+        reports whether the ones you took actually beat the ones you skipped.
+      </p>
+      <div id="journal-body"><p class="empty">Loading journal…</p></div>
     </section>
 
     <!-- ------------------------------------------------------ Settings -->

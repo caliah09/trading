@@ -322,3 +322,123 @@ class TestConcentration:
 
     def test_unknown_run_404(self, client):
         assert client.get("/api/rankings/999/concentration").status_code == 404
+
+
+class TestTickets:
+    def test_builds_a_ticket_for_a_candidate(self, seeded_client):
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        body = seeded_client.get(f"/api/rankings/{run_id}/AAPL/ticket").json()
+        assert body["ticket"]["underlying"] == "AAPL"
+        assert body["text"]
+        assert "not advice" in body["text"]
+
+    def test_instrument_can_be_forced(self, seeded_client):
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        body = seeded_client.get(
+            f"/api/rankings/{run_id}/AAPL/ticket?instrument=equity").json()
+        assert body["ticket"]["instrument"] == "equity"
+
+    def test_rejects_an_unknown_instrument(self, seeded_client):
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        assert seeded_client.get(
+            f"/api/rankings/{run_id}/AAPL/ticket?instrument=crypto").status_code == 422
+
+    def test_unknown_symbol_404(self, seeded_client):
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        assert seeded_client.get(f"/api/rankings/{run_id}/NOPE/ticket").status_code == 404
+
+    def test_ticket_never_includes_a_quantity(self, seeded_client):
+        """The screener does not size positions; the API must not imply it does."""
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        ticket = seeded_client.get(f"/api/rankings/{run_id}/AAPL/ticket").json()["ticket"]
+        assert "quantity" not in ticket
+        assert "Size this yourself" in ticket["sizing_note"]
+
+
+class TestDecisions:
+    def test_record_and_list(self, seeded_client):
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        response = seeded_client.post("/api/decisions", json={
+            "run_id": run_id, "symbol": "aapl", "decision": "taken", "note": "clean setup",
+        })
+        assert response.status_code == 200
+
+        decisions = seeded_client.get("/api/decisions").json()["decisions"]
+        assert len(decisions) == 1
+        assert decisions[0]["symbol"] == "AAPL"
+        assert decisions[0]["note"] == "clean setup"
+
+    def test_snapshots_the_score_at_decision_time(self, seeded_client):
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        seeded_client.post("/api/decisions", json={
+            "run_id": run_id, "symbol": "AAPL", "decision": "passed"})
+        decision = seeded_client.get("/api/decisions").json()["decisions"][0]
+        assert decision["composite"] is not None
+        assert decision["direction"]
+
+    def test_re_recording_overwrites(self, seeded_client):
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        for decision in ("watching", "taken"):
+            seeded_client.post("/api/decisions", json={
+                "run_id": run_id, "symbol": "AAPL", "decision": decision})
+        decisions = seeded_client.get("/api/decisions").json()["decisions"]
+        assert len(decisions) == 1
+        assert decisions[0]["decision"] == "taken"
+
+    def test_rejects_an_unknown_decision(self, seeded_client):
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        assert seeded_client.post("/api/decisions", json={
+            "run_id": run_id, "symbol": "AAPL", "decision": "maybe"}).status_code == 400
+
+    def test_rejects_a_missing_field(self, seeded_client):
+        assert seeded_client.post("/api/decisions", json={"symbol": "AAPL"}).status_code == 400
+
+    def test_rejects_an_unknown_run(self, client):
+        assert client.post("/api/decisions", json={
+            "run_id": 999, "symbol": "AAPL", "decision": "taken"}).status_code == 404
+
+    def test_rejects_a_ticker_not_in_the_run(self, seeded_client):
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        assert seeded_client.post("/api/decisions", json={
+            "run_id": run_id, "symbol": "ZZZZ", "decision": "taken"}).status_code == 404
+
+    def test_delete(self, seeded_client):
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        seeded_client.post("/api/decisions", json={
+            "run_id": run_id, "symbol": "AAPL", "decision": "taken"})
+        assert seeded_client.delete(f"/api/decisions/{run_id}/AAPL").status_code == 200
+        assert seeded_client.get("/api/decisions").json()["decisions"] == []
+
+    def test_delete_missing_404(self, seeded_client):
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        assert seeded_client.delete(f"/api/decisions/{run_id}/NOPE").status_code == 404
+
+    def test_filter_by_run(self, seeded_client):
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        seeded_client.post("/api/decisions", json={
+            "run_id": run_id, "symbol": "AAPL", "decision": "taken"})
+        assert len(seeded_client.get(f"/api/decisions?run_id={run_id}").json()["decisions"]) == 1
+        assert seeded_client.get("/api/decisions?run_id=999").json()["decisions"] == []
+
+
+class TestCalibration:
+    def test_empty_journal_says_so_rather_than_inventing_numbers(self, client):
+        body = client.get("/api/calibration").json()
+        assert body["actionable"] is False
+        assert "No decisions" in body["verdict"]
+        assert body["sample"]["taken"] == 0
+
+    def test_counts_decisions_without_outcomes(self, seeded_client):
+        run_id = seeded_client.get("/api/rankings/latest").json()["run"]["id"]
+        seeded_client.post("/api/decisions", json={
+            "run_id": run_id, "symbol": "AAPL", "decision": "taken"})
+        body = seeded_client.get("/api/calibration").json()
+        assert body["sample"]["taken"] == 1
+        assert body["sample"]["resolved_taken"] == 0
+        assert body["actionable"] is False
+
+    def test_horizon_is_configurable(self, client):
+        assert client.get("/api/calibration?horizon_days=5").json()["horizon_days"] == 5
+
+    def test_rejects_an_absurd_horizon(self, client):
+        assert client.get("/api/calibration?horizon_days=9999").status_code == 422

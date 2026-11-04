@@ -410,3 +410,62 @@ main { max-width: 1180px; margin: 0 auto; padding: 1.5rem; }
   .history-row { grid-template-columns: 1fr 1fr; }
   main { padding: 1rem; }
 }
+
+/* ----------------------------------------------- tickets and decisions */
+
+.ticket-pre {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.9rem 1rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre;
+  overflow-x: auto;
+  margin: 0 0 0.6rem;
+  color: var(--text-primary);
+}
+
+.decision-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+.decision-btn {
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 1rem;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.decision-btn:hover { border-color: var(--accent); }
+.decision-btn.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.decision-note {
+  flex: 1 1 260px;
+  padding: 0.45rem 0.6rem;
+  font: inherit;
+  font-size: 0.85rem;
+  background: var(--surface-0);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.btn-secondary.is-active-preset {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+}

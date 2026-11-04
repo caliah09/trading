@@ -33,7 +33,7 @@ from screener.config import ScreenerConfig
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DEFAULT_DB_PATH = Path("data/screener.sqlite")
 
@@ -145,6 +145,28 @@ CREATE TABLE IF NOT EXISTS app_settings (
     key    TEXT PRIMARY KEY,
     value  TEXT NOT NULL
 );
+
+-- What you actually did about each candidate. This is the one thing the
+-- screener cannot derive for itself: it can compute what every ticker did
+-- next, but not which ones you chose to act on. Without it every weight in
+-- the config is an opinion; with it they can be measured.
+CREATE TABLE IF NOT EXISTS decisions (
+    run_id        INTEGER NOT NULL,
+    symbol        TEXT NOT NULL,
+    decision      TEXT NOT NULL,     -- 'taken' | 'passed' | 'watching'
+    note          TEXT,
+    instrument    TEXT,              -- 'option' | 'equity' | 'leveraged_etf'
+    contract      TEXT,              -- contract identifier when instrument='option'
+    entry_price   REAL,
+    quantity      REAL,
+    -- Snapshot of the score as it stood, so analysis survives later config changes.
+    composite     REAL,
+    direction     TEXT,
+    decided_at    TEXT NOT NULL,
+    PRIMARY KEY (run_id, symbol),
+    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_decided ON decisions(decided_at DESC);
 """
 
 
@@ -182,11 +204,18 @@ class Database:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             if version == 0:
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            elif version != SCHEMA_VERSION:
+            elif version < SCHEMA_VERSION:
+                # Every schema change so far has been purely additive, and the
+                # CREATE TABLE IF NOT EXISTS statements above have just applied
+                # it. Nothing is dropped or rewritten, so existing data is safe.
+                log.info("Upgraded database schema from version %s to %s",
+                         version, SCHEMA_VERSION)
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            elif version > SCHEMA_VERSION:
                 log.warning(
-                    "Database schema version %s does not match expected %s. "
-                    "No migration is defined; back up %s before continuing.",
-                    version, SCHEMA_VERSION, self.path,
+                    "Database at %s was written by a newer version of this app "
+                    "(schema %s, this build expects %s). Back it up before continuing.",
+                    self.path, version, SCHEMA_VERSION,
                 )
 
     # -- prices ------------------------------------------------------------
@@ -499,6 +528,80 @@ class Database:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
+
+    # -- decisions ---------------------------------------------------------
+
+    def record_decision(self, run_id: int, symbol: str, decision: str, **fields) -> None:
+        """Store what you did about one candidate. Re-recording overwrites."""
+        if decision not in ("taken", "passed", "watching"):
+            raise ValueError(
+                f"decision must be 'taken', 'passed' or 'watching', got {decision!r}"
+            )
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO decisions (run_id, symbol, decision, note, instrument, "
+                "contract, entry_price, quantity, composite, direction, decided_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(run_id, symbol) DO UPDATE SET "
+                "decision=excluded.decision, note=excluded.note, "
+                "instrument=excluded.instrument, contract=excluded.contract, "
+                "entry_price=excluded.entry_price, quantity=excluded.quantity, "
+                "decided_at=excluded.decided_at",
+                (
+                    run_id, symbol, decision, fields.get("note"),
+                    fields.get("instrument"), fields.get("contract"),
+                    fields.get("entry_price"), fields.get("quantity"),
+                    fields.get("composite"), fields.get("direction"), _utcnow(),
+                ),
+            )
+
+    def get_decisions(self, run_id: int | None = None, limit: int = 500) -> list[dict]:
+        query = "SELECT * FROM decisions"
+        params: tuple = ()
+        if run_id is not None:
+            query += " WHERE run_id = ?"
+            params = (run_id,)
+        query += " ORDER BY decided_at DESC LIMIT ?"
+        params = params + (limit,)
+        with self.connect() as conn:
+            return [dict(r) for r in conn.execute(query, params).fetchall()]
+
+    def delete_decision(self, run_id: int, symbol: str) -> bool:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM decisions WHERE run_id = ? AND symbol = ?", (run_id, symbol)
+            )
+            return cursor.rowcount > 0
+
+    def decisions_with_outcomes(self, horizon_days: int) -> list[dict]:
+        """Every decision that now has a forward return at ``horizon_days``.
+
+        Joins the decision to the forward return *and* to the parameter
+        breakdown that produced the score, which is what makes per-parameter
+        calibration possible.
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT d.run_id, d.symbol, d.decision, d.composite, d.direction, "
+                "       d.instrument, d.decided_at, "
+                "       f.return_pct, f.directional_pct "
+                "FROM decisions d "
+                "JOIN forward_returns f "
+                "  ON f.run_id = d.run_id AND f.symbol = d.symbol "
+                "WHERE f.horizon_days = ? "
+                "ORDER BY d.decided_at",
+                (horizon_days,),
+            ).fetchall()
+            outcomes = [dict(r) for r in rows]
+
+            for item in outcomes:
+                params = conn.execute(
+                    "SELECT param_key, label, status, contribution, signal, raw_value "
+                    "FROM parameter_results WHERE run_id = ? AND symbol = ?",
+                    (item["run_id"], item["symbol"]),
+                ).fetchall()
+                item["parameters"] = [dict(p) for p in params]
+        return outcomes
 
     def run_entries_for_returns(self, run_id: int) -> list[dict]:
         with self.connect() as conn:

@@ -176,12 +176,42 @@ function renderRankings() {
   if (top.length) {
     body.append(sectionLabel('Best candidates right now',
       `Top ${top.length} of ${data.entries.length} by composite score`));
-    top.forEach((entry) => body.append(rankRow(entry, maxScore, true)));
+    top.forEach((entry) => body.append(rankRow(entry, maxScore, true, run.id)));
   }
   if (rest.length) {
     body.append(sectionLabel('Rest of the watchlist', 'Ranked in order — click any row for its full breakdown'));
-    rest.forEach((entry) => body.append(rankRow(entry, maxScore, false)));
+    rest.forEach((entry) => body.append(rankRow(entry, maxScore, false, run.id)));
   }
+  loadConcentration(run.id, body);
+}
+
+/* The ranking scores each ticker alone, so it cannot see that its leaders move
+   together. This is the portfolio view of the same list. */
+async function loadConcentration(runId, body) {
+  let data;
+  try {
+    data = await api(`/api/rankings/${runId}/concentration`);
+  } catch (err) {
+    return;
+  }
+  if (!data.available) return;
+
+  const panel = el('div', 'note');
+  const heading = el('strong', null,
+    `Top ${data.nominal_positions} candidates ≈ ${data.effective_positions} independent `
+    + `bet${data.effective_positions === 1 ? '' : 's'}`);
+  panel.append(heading);
+  if (data.average_correlation != null) {
+    panel.append(el('span', null, `  ·  average correlation ${data.average_correlation.toFixed(2)}`));
+  }
+  (data.warnings || []).forEach((warning) => {
+    panel.append(document.createElement('br'));
+    panel.append(el('span', null, warning));
+  });
+  if (data.effective_positions < data.nominal_positions) {
+    panel.classList.add('note-warn');
+  }
+  body.append(panel);
 }
 
 function sectionLabel(title, sub) {
@@ -191,7 +221,7 @@ function sectionLabel(title, sub) {
   return wrap;
 }
 
-function rankRow(entry, maxScore, isTop) {
+function rankRow(entry, maxScore, isTop, runId) {
   const row = el('button', 'rank-row' + (isTop ? ' is-top' : ''));
   row.type = 'button';
   row.append(el('span', 'rank-num', `${entry.rank}`));
@@ -223,13 +253,13 @@ function rankRow(entry, maxScore, isTop) {
     : 'All configured parameters computed.';
   row.append(badge);
 
-  row.addEventListener('click', () => openDetail(entry));
+  row.addEventListener('click', () => openDetail(entry, runId));
   return row;
 }
 
 /* -------------------------------------------------------------- detail */
 
-function openDetail(entry) {
+function openDetail(entry, runId) {
   const content = $('#detail-content');
   content.textContent = '';
 
@@ -288,6 +318,21 @@ function openDetail(entry) {
       ? entry.options_notes.join(' ')
       : 'No contract was selected.';
     content.append(el('p', 'note note-warn', why));
+  }
+
+  if (runId) {
+    content.append(el('h3', null, 'Order ticket'));
+    const ticketBox = el('div');
+    ticketBox.append(el('p', 'param-why', 'Loading ticket…'));
+    content.append(ticketBox);
+    loadTicket(runId, entry.symbol, ticketBox);
+
+    content.append(el('h3', null, 'Your decision'));
+    content.append(el('p', 'param-why',
+      'Recording what you do here is what lets the weights be measured instead of assumed. '
+      + 'Marking what you skip matters as much as what you take — without it there is no '
+      + 'comparison group.'));
+    content.append(decisionControls(runId, entry));
   }
 
   if (entry.forward_returns && entry.forward_returns.length) {
@@ -425,6 +470,210 @@ function forwardReturnsBlock(entry) {
   return grid;
 }
 
+async function loadTicket(runId, symbol, container) {
+  let data;
+  try {
+    data = await api(`/api/rankings/${runId}/${encodeURIComponent(symbol)}/ticket`);
+  } catch (err) {
+    container.textContent = '';
+    container.append(el('p', 'note note-warn', `Could not build a ticket: ${err.message}`));
+    return;
+  }
+
+  container.textContent = '';
+  const pre = el('pre', 'ticket-pre', data.text);
+  container.append(pre);
+
+  const actions = el('div', 'settings-actions');
+  const copy = el('button', 'btn-secondary', 'Copy ticket');
+  copy.type = 'button';
+  copy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(data.text);
+      toast('Ticket copied.');
+    } catch (err) {
+      toast('Could not copy — select the text manually.', true);
+    }
+  });
+  actions.append(copy);
+
+  const instruments = ['auto', 'option', 'equity', 'leveraged_etf'];
+  const select = el('select');
+  instruments.forEach((name) => {
+    const option = el('option', null, name.replace('_', ' '));
+    option.value = name;
+    select.append(option);
+  });
+  select.addEventListener('change', async () => {
+    container.textContent = '';
+    container.append(el('p', 'param-why', 'Rebuilding…'));
+    try {
+      const rebuilt = await api(
+        `/api/rankings/${runId}/${encodeURIComponent(symbol)}/ticket?instrument=${select.value}`);
+      container.textContent = '';
+      container.append(el('pre', 'ticket-pre', rebuilt.text));
+      container.append(actions);
+    } catch (err) {
+      container.textContent = '';
+      container.append(el('p', 'note note-warn', err.message));
+    }
+  });
+  actions.append(select);
+  actions.append(el('span', 'hint', 'Nothing is placed from here.'));
+  container.append(actions);
+}
+
+function decisionControls(runId, entry) {
+  const wrap = el('div', 'decision-row');
+  const options = [
+    ['taken', 'Taken'],
+    ['passed', 'Passed'],
+    ['watching', 'Watching'],
+  ];
+
+  const note = el('input');
+  note.type = 'text';
+  note.placeholder = 'Optional note — why you took or skipped it';
+  note.className = 'decision-note';
+
+  const buttons = options.map(([value, label]) => {
+    const button = el('button', 'decision-btn', label);
+    button.type = 'button';
+    button.dataset.decision = value;
+    button.addEventListener('click', async () => {
+      try {
+        await api('/api/decisions', {
+          method: 'POST',
+          body: JSON.stringify({
+            run_id: runId, symbol: entry.symbol,
+            decision: value, note: note.value || null,
+          }),
+        });
+        buttons.forEach((b) => b.classList.toggle('is-active', b.dataset.decision === value));
+        toast(`${entry.symbol} marked ${label.toLowerCase()}.`);
+      } catch (err) {
+        toast(`Could not record: ${err.message}`, true);
+      }
+    });
+    return button;
+  });
+
+  buttons.forEach((b) => wrap.append(b));
+  wrap.append(note);
+
+  // Reflect anything already recorded for this run/ticker.
+  api(`/api/decisions?run_id=${runId}`).then((data) => {
+    const existing = (data.decisions || []).find((d) => d.symbol === entry.symbol);
+    if (!existing) return;
+    buttons.forEach((b) => b.classList.toggle('is-active', b.dataset.decision === existing.decision));
+    if (existing.note) note.value = existing.note;
+  }).catch(() => {});
+
+  return wrap;
+}
+
+/* ------------------------------------------------------------- journal */
+
+async function loadJournal() {
+  const body = $('#journal-body');
+  body.textContent = '';
+  let data;
+  try {
+    data = await api('/api/calibration');
+  } catch (err) {
+    body.append(el('p', 'empty', `Could not load the journal: ${err.message}`));
+    return;
+  }
+
+  const verdict = el('div', 'note' + (data.actionable ? '' : ' note-warn'));
+  verdict.append(el('strong', null, data.verdict));
+  body.append(verdict);
+
+  const sample = el('div', 'perf-grid');
+  const card = el('div', 'perf-card');
+  card.append(el('h4', null, 'Sample'));
+  const line = (label, value) => {
+    const row = el('div', 'perf-line');
+    row.append(el('span', null, label));
+    row.append(el('span', 'val', String(value)));
+    card.append(row);
+  };
+  line('Taken', data.sample.taken);
+  line('Passed', data.sample.passed);
+  line('Watching', data.sample.watching);
+  line('Resolved', `${data.sample.resolved_taken} / ${data.sample.minimum_for_suggestions} needed`);
+  sample.append(card);
+
+  if (data.taken_mean != null || data.passed_mean != null) {
+    const perf = el('div', 'perf-card');
+    perf.append(el('h4', null, `Outcome at +${data.horizon_days} days`));
+    const row = (label, value) => {
+      const div = el('div', 'perf-line');
+      div.append(el('span', null, label));
+      const text = value == null ? '—' : `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
+      div.append(el('span', `val ${value >= 0 ? 'pos' : 'neg'}`, text));
+      perf.append(div);
+    };
+    row('Taken avg', data.taken_mean);
+    row('Passed avg', data.passed_mean);
+    row('Selection edge', data.selection_edge);
+    if (data.hit_rate != null) {
+      const div = el('div', 'perf-line');
+      div.append(el('span', null, 'Hit rate'));
+      div.append(el('span', 'val', `${data.hit_rate.toFixed(0)}%`));
+      perf.append(div);
+    }
+    sample.append(perf);
+  }
+  body.append(sample);
+
+  (data.warnings || []).forEach((warning) => {
+    body.append(el('p', 'note note-warn', warning));
+  });
+
+  if (!data.parameters || !data.parameters.length) {
+    // Nothing has resolved yet, so an empty table with headers would just look broken.
+    body.append(el('p', 'empty',
+      'Per-parameter analysis appears once decisions resolve. Mark candidates as you go — '
+      + 'the comparison needs both the ones you took and the ones you skipped.'));
+    return;
+  }
+
+  body.append(el('h3', null, 'Which parameters separated winners from losers'));
+  body.append(el('p', 'param-why',
+    'Among the trades you took, the average contribution of each parameter in the winners '
+    + 'versus the losers. A large gap means that parameter was doing real work.'));
+
+  const table = el('table', 'param-table');
+  const head = el('tr');
+  ['Parameter', 'In winners', 'In losers', 'Separation', 'Weight', 'Suggestion']
+    .forEach((label) => head.append(el('th', null, label)));
+  // Element.append() returns undefined, so these cannot be chained.
+  const thead = el('thead');
+  thead.append(head);
+  table.append(thead);
+
+  const tbody = el('tbody');
+  (data.parameters || []).forEach((param) => {
+    const row = el('tr', param.suggested_weight == null ? 'is-missing' : '');
+    row.append(el('td', 'param-name', param.label));
+    const fmt = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}`);
+    row.append(el('td', 'param-value', fmt(param.winners_mean)));
+    row.append(el('td', 'param-value', fmt(param.losers_mean)));
+    row.append(el('td', 'param-value', fmt(param.separation)));
+    row.append(el('td', 'param-value',
+      param.suggested_weight == null
+        ? String(param.current_weight)
+        : `${param.current_weight} → ${param.suggested_weight}`));
+    row.append(el('td', 'param-why', param.rationale));
+    tbody.append(row);
+  });
+  table.append(tbody);
+  const scroller = el('div', 'table-scroll');
+  scroller.append(table);
+  body.append(scroller);
+}
+
 function closeDetail() {
   $('#detail-overlay').hidden = true;
 }
@@ -534,7 +783,7 @@ async function openHistoryRun(runId) {
   content.append(el('h3', null, 'The ranking as it stood'));
   const maxScore = Math.max(...ranking.entries.map((e) => e.composite), 1);
   ranking.entries.forEach((entry) => {
-    content.append(rankRow(entry, maxScore, entry.rank <= (ranking.top_n || 5)));
+    content.append(rankRow(entry, maxScore, entry.rank <= (ranking.top_n || 5), run.id));
   });
 }
 
@@ -562,6 +811,42 @@ function renderSettings() {
   const specs = state.meta ? state.meta.parameters : [];
 
   const grid = el('div', 'settings-grid');
+
+  /* --- weight presets --- */
+  const presetBox = el('div', 'field-group');
+  presetBox.append(el('h3', null, 'Weight preset'));
+  presetBox.append(el('p', 'hint',
+    'A preset only replaces the weights — your watchlist, posture and thresholds are left '
+    + 'alone. Applying one overwrites any hand-tuned weights.'));
+  const presetRow = el('div', 'settings-actions');
+  api('/api/presets').then((data) => {
+    data.presets.forEach((preset) => {
+      const button = el('button',
+        'btn-secondary' + (data.current === preset.name ? ' is-active-preset' : ''),
+        preset.name.replace(/_/g, ' '));
+      button.type = 'button';
+      button.title = preset.description;
+      button.addEventListener('click', async () => {
+        try {
+          const result = await api(`/api/presets/${preset.name}`, { method: 'POST' });
+          toast(result.note);
+          loadSettings();
+        } catch (err) {
+          toast(`Could not apply: ${err.message}`, true);
+        }
+      });
+      presetRow.append(button);
+    });
+    if (data.current) {
+      presetRow.append(el('span', 'hint', `Currently: ${data.current.replace(/_/g, ' ')}`));
+    } else {
+      presetRow.append(el('span', 'hint', 'Currently: custom weights'));
+    }
+  }).catch(() => {
+    presetRow.append(el('span', 'hint', 'Presets unavailable.'));
+  });
+  presetBox.append(presetRow);
+  grid.append(presetBox);
 
   /* --- watchlist and global knobs --- */
   const general = el('div', 'field-group');
@@ -809,6 +1094,7 @@ function switchView(name) {
     view.classList.toggle('is-active', view.id === `view-${name}`);
   });
   if (name === 'history') loadHistory();
+  if (name === 'journal') loadJournal();
   if (name === 'settings') loadSettings();
 }
 
