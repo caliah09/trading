@@ -44,7 +44,13 @@ COPY pyproject.toml README.md ./
 # path: set SCREENER_PASSWORD_HASH in the platform, confirm the login still
 # works, then delete these two lines. Until then, treat the deployed URL as
 # protected by a password that is not actually a secret.
-ENV SCREENER_PASSWORD_HASH=scrypt$6c97853193ffa1bfba07f989c02bef7d$94c4843d32877ee10fc46ef6cfbeaeb2000c403533a89558605fdb2da5cc25bb
+#
+# The backslashes are required. ENV expands $NAME in its value, and an scrypt
+# hash is scrypt$salt$hash — so an unescaped hash loses both $-delimited
+# segments to undefined build variables. The app then starts normally with
+# authentication on and rejects every password, logging "Stored password hash
+# is malformed". Escaping keeps the dollars literal.
+ENV SCREENER_PASSWORD_HASH=scrypt\$6c97853193ffa1bfba07f989c02bef7d\$94c4843d32877ee10fc46ef6cfbeaeb2000c403533a89558605fdb2da5cc25bb
 
 # Unprivileged user for the application process.
 #
