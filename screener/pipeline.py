@@ -313,6 +313,10 @@ class RefreshPipeline:
         # read still gets a call-side look so the detail view can show what the
         # chain offers, but the conviction gate keeps it from inflating the score.
         chain_side = "put" if read.direction == "put" else "call"
+
+        # The stock layer is what knows how long its setup takes, and it has
+        # already run — so the expected hold can steer contract selection
+        # rather than only being reported afterwards.
         assessment = analyse_options(
             provider=self.provider,
             symbol=symbol,
@@ -320,6 +324,7 @@ class RefreshPipeline:
             config=config,
             direction=chain_side,
             today=self.today,
+            min_hold_sessions=_expected_hold_sessions(stock_results),
         )
         data.options = assessment
 
@@ -424,3 +429,20 @@ def build_provider(name: str, today: date | None = None) -> MarketDataProvider:
         from screener.providers.synthetic import SyntheticProvider
         return SyntheticProvider(today=today)
     raise ValueError(f"Unknown provider {name!r}. Expected 'yfinance' or 'synthetic'.")
+
+
+def _expected_hold_sessions(stock_results) -> int | None:
+    """Longest expected hold any stock-layer parameter reports, in sessions.
+
+    Only pattern parameters carry one today — Head & Shoulders, whose research
+    puts the cost-surviving edge near a 60-session hold. Taking the longest
+    rather than the first means adding a slower pattern later widens the
+    requirement instead of being silently ignored by declaration order.
+    """
+    holds = [
+        int(r.detail["expected_hold_sessions"])
+        for r in stock_results
+        if r.status == "ok" and isinstance(getattr(r, "detail", None), dict)
+        and r.detail.get("expected_hold_sessions")
+    ]
+    return max(holds) if holds else None

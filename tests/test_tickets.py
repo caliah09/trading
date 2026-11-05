@@ -38,7 +38,7 @@ def entry(**overrides) -> dict:
         },
         "parameters": [
             param("head_shoulders", -8.5, detail={
-                "neckline_now": 186.2, "target": 168.0, "expected_hold_days": 60,
+                "neckline_now": 186.2, "target": 168.0, "expected_hold_sessions": 60,
             }),
             param("vol_risk_premium", 6.0, detail={"realised_vol": 28.0, "implied_vol": 31.0}),
         ],
@@ -112,7 +112,7 @@ class TestPatternContext:
         ticket = build_ticket(entry())
         assert ticket.invalidation == pytest.approx(186.2)
         assert ticket.target == pytest.approx(168.0)
-        assert ticket.expected_hold_days == 60
+        assert ticket.expected_hold_sessions == 60
         assert "neckline" in ticket.invalidation_reason
 
     def test_absent_pattern_leaves_them_empty(self):
@@ -213,7 +213,7 @@ class TestLeveragedTicket:
         """A small projected move over a long hold is a bad leveraged trade."""
         data = entry(symbol="QQQ", spot=180.0, parameters=[
             param("head_shoulders", -8.5, detail={
-                "neckline_now": 182.0, "target": 179.0, "expected_hold_days": 120,
+                "neckline_now": 182.0, "target": 179.0, "expected_hold_sessions": 120,
             }),
             param("vol_risk_premium", 6.0, detail={"realised_vol": 55.0}),
         ])

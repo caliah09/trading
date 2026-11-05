@@ -27,6 +27,7 @@ import pandas as pd
 
 from screener.blackscholes import delta as bs_delta
 from screener.config import ScreenerConfig
+from screener.market_calendar import trading_days_between
 from screener.providers.base import ChainSnapshot, MarketDataProvider
 from screener.scoring.ramps import window_fit
 
@@ -94,12 +95,16 @@ def analyse_options(
     config: ScreenerConfig,
     direction: str,
     today: date | None = None,
+    min_hold_sessions: int | None = None,
 ) -> OptionsAssessment:
     """Sample IV and select a contract for ``symbol``.
 
     Args:
         direction: "call" or "put" — the lean chosen by the stock layer. The
             contract is selected from that side of the chain.
+        min_hold_sessions: trading sessions the setup is expected to need.
+            Expiries that cannot cover it are excluded from selection when
+            a longer one exists.
 
     Returns an assessment whose fields are ``None`` where data was unavailable;
     the scoring engine converts those into "insufficient data" and redistributes
@@ -131,8 +136,43 @@ def analyse_options(
 
     # -- 2. Contract selection --------------------------------------------
     target = config.target()
+
+    # Expiries that cannot outlast the thesis are removed before ranking.
+    #
+    # The DTE target window is a preference about how much time you want to
+    # buy. The expected hold is a claim about how long the setup needs. Those
+    # are different things, and nothing used to reconcile them: a 45-90 day
+    # window happily returned a contract covering 48 sessions for a setup the
+    # research associates with 60.
+    #
+    # Only applied when something longer actually exists. Refusing every
+    # expiry would turn "this one is too short" into "no contract found",
+    # which is strictly less useful -- a flagged short contract still tells
+    # you what the chain offers. When nothing covers the hold, selection
+    # proceeds unfiltered and the ticket warns.
+    candidates = expiries
+    if min_hold_sessions:
+        covering = [
+            e for e in expiries
+            if trading_days_between(today, e) >= min_hold_sessions
+        ]
+        if covering:
+            dropped = len(expiries) - len(covering)
+            candidates = covering
+            if dropped:
+                assessment.notes.append(
+                    f"Skipped {dropped} expiry/expiries that would close before the "
+                    f"~{min_hold_sessions}-session hold this setup is expected to need."
+                )
+        else:
+            assessment.notes.append(
+                f"No listed expiry covers the ~{min_hold_sessions}-session hold this "
+                "setup is expected to need. The suggested contract runs out of time "
+                "before the thesis is due to resolve."
+            )
+
     ranked_expiries = sorted(
-        expiries,
+        candidates,
         key=lambda e: window_fit(
             (e - today).days, target.dte_low, target.dte_high,
             config.threshold("dte_fit", "tolerance"),

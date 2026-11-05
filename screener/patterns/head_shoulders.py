@@ -37,12 +37,15 @@ import pandas as pd
 
 from screener.pivots import Pivot
 
-__all__ = ["HeadShoulders", "detect_head_shoulders", "EXPECTED_HOLD_DAYS"]
+__all__ = ["HeadShoulders", "detect_head_shoulders", "EXPECTED_HOLD_SESSIONS"]
 
-#: Trading days the research associates with the pattern's cost-surviving edge.
+#: TRADING SESSIONS -- not calendar days -- that the research associates with
+#: the pattern's cost-surviving edge. The unit is in the name because it was
+#: not, and a comparison against an option's calendar-day DTE read 71 > 60 and
+#: stayed silent while the contract covered only 48 sessions.
 #: Savin et al.: net of transaction costs, excess returns remain positive only
 #: at the 60-day holding period. Used to propose an option expiry.
-EXPECTED_HOLD_DAYS = 60
+EXPECTED_HOLD_SESSIONS = 60
 
 
 @dataclass
@@ -94,7 +97,7 @@ class HeadShoulders:
             "is_continuation": self.is_continuation,
             "in_pullback": self.in_pullback,
             "target": None if self.target is None else round(self.target, 4),
-            "expected_hold_days": EXPECTED_HOLD_DAYS,
+            "expected_hold_sessions": EXPECTED_HOLD_SESSIONS,
             "pivots": {
                 "left_shoulder": self.left_shoulder.to_dict(),
                 "trough_1": self.trough_1.to_dict(),

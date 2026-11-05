@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 
+from screener.market_calendar import trading_days_between
+
 __all__ = [
     "OrderTicket", "LeveragedPair", "LEVERAGED_PAIRS",
     "build_ticket", "leveraged_drag",
@@ -69,7 +71,7 @@ class OrderTicket:
     invalidation: float | None = None
     invalidation_reason: str = ""
     target: float | None = None
-    expected_hold_days: int | None = None
+    expected_hold_sessions: int | None = None
     max_loss: str = ""
     sizing_note: str = ""
     cost_notes: list[str] = field(default_factory=list)
@@ -92,7 +94,7 @@ class OrderTicket:
             "invalidation": self.invalidation,
             "invalidation_reason": self.invalidation_reason,
             "target": self.target,
-            "expected_hold_days": self.expected_hold_days,
+            "expected_hold_sessions": self.expected_hold_sessions,
             "max_loss": self.max_loss,
             "sizing_note": self.sizing_note,
             "cost_notes": self.cost_notes,
@@ -121,8 +123,8 @@ class OrderTicket:
             lines.append(f"  invalidation   {self.invalidation:,.2f}   {self.invalidation_reason}")
         if self.target is not None:
             lines.append(f"  target         {self.target:,.2f}")
-        if self.expected_hold_days:
-            lines.append(f"  expected hold  ~{self.expected_hold_days} sessions")
+        if self.expected_hold_sessions:
+            lines.append(f"  expected hold  ~{self.expected_hold_sessions} sessions")
         if self.max_loss:
             lines.append(f"  max loss       {self.max_loss}")
         if self.composite is not None:
@@ -237,7 +239,7 @@ def build_ticket(
     _apply_reasoning(ticket, entry)
 
     if chosen == "option":
-        _fill_option(ticket, contract, price_cap_pct)
+        _fill_option(ticket, contract, price_cap_pct, today)
     elif chosen == "leveraged_etf":
         _fill_leveraged(ticket, entry, spot, risk_free_rate)
     else:
@@ -284,8 +286,8 @@ def _apply_pattern_context(ticket: OrderTicket, entry: dict) -> None:
             ticket.invalidation_reason = "(neckline — pattern fails beyond this)"
         if detail.get("target") is not None:
             ticket.target = float(detail["target"])
-        if detail.get("expected_hold_days"):
-            ticket.expected_hold_days = int(detail["expected_hold_days"])
+        if detail.get("expected_hold_sessions"):
+            ticket.expected_hold_sessions = int(detail["expected_hold_sessions"])
         return
 
 
@@ -303,7 +305,8 @@ def _apply_reasoning(ticket: OrderTicket, entry: dict) -> None:
         )
 
 
-def _fill_option(ticket: OrderTicket, contract: dict | None, price_cap_pct: float) -> None:
+def _fill_option(ticket: OrderTicket, contract: dict | None, price_cap_pct: float,
+                 today: date | None = None) -> None:
     if not contract:
         ticket.instrument = "equity"
         ticket.warnings.append("No contract was selected, so this fell back to the underlying.")
@@ -330,12 +333,27 @@ def _fill_option(ticket: OrderTicket, contract: dict | None, price_cap_pct: floa
             f"Open interest is only {float(contract['open_interest']):.0f}. Getting out may "
             "be harder than getting in."
         )
-    if ticket.expected_hold_days and contract.get("dte"):
-        if int(contract["dte"]) < ticket.expected_hold_days:
+    # Sessions against sessions.
+    #
+    # This compared the contract's calendar-day DTE against a hold measured in
+    # trading sessions. On a 71-day contract with a 60-session hold it asked
+    # 71 < 60, answered no, and said nothing -- while the contract actually
+    # covered 48 sessions. Holidays make the gap worse than the weekend
+    # arithmetic suggests: Thanksgiving, Christmas, New Year and MLK all fall
+    # inside a November-to-January window.
+    #
+    # The calendar is already in the codebase, so count real sessions rather
+    # than applying a 7/5 fudge factor to approximate them.
+    covered = _sessions_to_expiry(contract, today)
+    if ticket.expected_hold_sessions and covered is not None:
+        if covered < ticket.expected_hold_sessions:
+            short_by = ticket.expected_hold_sessions - covered
             ticket.warnings.append(
-                f"Expiry is {contract['dte']} days out but the pattern's edge is associated "
-                f"with a ~{ticket.expected_hold_days}-session hold. This expires before the "
-                "thesis is expected to resolve."
+                f"Expiry covers {covered} trading sessions but the pattern's edge is "
+                f"associated with a ~{ticket.expected_hold_sessions}-session hold — "
+                f"{short_by} short. This contract expires before the thesis is "
+                "expected to resolve. A later expiry costs more premium; that is the "
+                "price of giving the thesis room to work."
             )
     ticket.cost_notes.append(
         "Theta runs against a long option every day the thesis takes to play out."
@@ -374,7 +392,7 @@ def _fill_leveraged(ticket: OrderTicket, entry: dict, spot: float | None,
     ticket.price_basis = "market on open, or a limit of your choosing"
 
     realised_vol = _realised_vol(entry)
-    hold = ticket.expected_hold_days or 60
+    hold = ticket.expected_hold_sessions or 60
     if realised_vol is None:
         ticket.warnings.append(
             "Realised volatility was unavailable, so holding cost could not be estimated. "
@@ -412,3 +430,23 @@ def _realised_vol(entry: dict) -> float | None:
         if param.get("param_key") == "vol_risk_premium" and detail.get("realised_vol"):
             return float(detail["realised_vol"])
     return None
+
+
+def _sessions_to_expiry(contract: dict, today: date | None) -> int | None:
+    """Trading sessions between today and the contract's expiry.
+
+    Returns None when the expiry cannot be read, so the caller stays silent
+    rather than warning on a guess.
+
+    Calendar days are the wrong unit for this comparison and understate the
+    shortfall badly over a holiday-heavy stretch: 71 calendar days from early
+    November is 48 sessions, not the ~51 a weekends-only estimate gives.
+    """
+    raw = contract.get("expiry")
+    if not raw:
+        return None
+    try:
+        expiry = date.fromisoformat(str(raw)[:10])
+    except ValueError:
+        return None
+    return trading_days_between(today or date.today(), expiry)

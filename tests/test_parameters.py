@@ -420,7 +420,7 @@ class TestHeadShouldersScorer:
 
         result = P.score_head_shoulders(self._data(BEARISH), config)
         assert "60" in result.explanation
-        assert result.detail["expected_hold_days"] == 60
+        assert result.detail["expected_hold_sessions"] == 60
 
     def test_forming_pattern_scores_below_a_confirmed_one(self, config):
         from tests.test_head_shoulders import BEARISH, BEARISH_FORMING

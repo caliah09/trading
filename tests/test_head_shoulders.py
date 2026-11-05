@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from screener.patterns.head_shoulders import (
-    EXPECTED_HOLD_DAYS,
+    EXPECTED_HOLD_SESSIONS,
     detect_head_shoulders,
 )
 from screener.pivots import find_pivots
@@ -72,7 +72,7 @@ class TestBearishDetection:
 
     def test_carries_the_research_backed_hold_period(self):
         pattern, _, _ = detect(BEARISH)
-        assert pattern.to_dict()["expected_hold_days"] == EXPECTED_HOLD_DAYS == 60
+        assert pattern.to_dict()["expected_hold_sessions"] == EXPECTED_HOLD_SESSIONS == 60
 
 
 class TestBullishDetection:

@@ -32,7 +32,7 @@ from screener.config import ScreenerConfig
 from screener.market_calendar import trading_days_between
 from screener.options_analysis import OptionsAssessment
 from screener.param_specs import spec
-from screener.patterns.head_shoulders import EXPECTED_HOLD_DAYS, detect_head_shoulders
+from screener.patterns.head_shoulders import EXPECTED_HOLD_SESSIONS, detect_head_shoulders
 from screener.pivots import find_pivots
 from screener.scoring.ramps import ramp01, signed_ramp, soft_sign, window_fit
 
@@ -446,7 +446,7 @@ def score_head_shoulders(data: TickerData, config: ScreenerConfig) -> ParameterR
     if pattern.target is not None:
         parts.append(
             f"The measured move projects roughly {pattern.target:,.2f}. Research puts this "
-            f"pattern's cost-surviving edge near a {EXPECTED_HOLD_DAYS}-trading-day hold, so an "
+            f"pattern's cost-surviving edge near a {EXPECTED_HOLD_SESSIONS}-trading-day hold, so an "
             "expiry shorter than that is trading a horizon the evidence does not support."
         )
 
