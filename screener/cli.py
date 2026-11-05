@@ -66,6 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="Show the last and next scheduled refresh")
 
+    doctor = sub.add_parser(
+        "doctor",
+        help="Check the data source end to end on one ticker and report what works",
+    )
+    doctor.add_argument("--symbol", default="AAPL",
+                        help="Ticker to probe (default: AAPL)")
+
     watch = sub.add_parser("watchlist", help="Show or replace the watchlist")
     watch.add_argument("symbols", nargs="*", help="Replace the watchlist with these symbols")
 
@@ -83,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
         return _refresh(args, db)
     if args.command == "status":
         return _status(db)
+    if args.command == "doctor":
+        return _doctor(args, db)
     if args.command == "watchlist":
         return _watchlist(args, db)
     return 1
@@ -155,6 +164,112 @@ def _status(db: Database) -> int:
         print(f"  Next scheduled slot:     {upcoming[0]:%Y-%m-%d %H:%M %Z} ({upcoming[1]})")
     print("\n  Note: scheduled refreshes only fire while `screener serve` is running.\n")
     return 0
+
+
+def _doctor(args, db: Database) -> int:
+    """Probe the data source step by step and say exactly what works.
+
+    Exists because the failure modes of an unofficial scraper are many and
+    look alike from the outside: a blocked host, a rate limit, a delisted
+    ticker and a schema change all surface as "no data". This separates them.
+    """
+    from datetime import date
+
+    symbol = args.symbol.strip().upper()
+    print(f"\n  Probing {args.provider} with {symbol}\n  " + "-" * 52)
+    failures = 0
+
+    def check(label: str, fn):
+        nonlocal failures
+        try:
+            ok, detail = fn()
+        except Exception as exc:
+            failures += 1
+            print(f"  [FAIL] {label:<26} {type(exc).__name__}: {str(exc)[:90]}")
+            return None
+        mark = "ok  " if ok else "WARN"
+        if not ok:
+            failures += 1
+        print(f"  [{mark}] {label:<26} {detail}")
+        return detail
+
+    if args.provider == "yfinance":
+        def _version():
+            import yfinance
+            return True, f"yfinance {yfinance.__version__}"
+        check("library", _version)
+
+    provider = build_provider(args.provider)
+
+    prices = None
+
+    def _history():
+        nonlocal prices
+        prices = provider.price_history(symbol, 400)
+        if prices.empty:
+            return False, "no rows — ticker unknown, delisted, or the source is throttling"
+        last = prices.index[-1].date()
+        stale = (date.today() - last).days
+        return True, (f"{len(prices)} bars, latest {last}"
+                      + (f" ({stale}d old)" if stale > 4 else ""))
+    check("price history", _history)
+
+    expiries = check("option expiries", lambda: (
+        (True, f"{len(provider.option_expiries(symbol))} listed")
+        if provider.option_expiries(symbol) else (False, "none listed")
+    ))
+
+    def _chain():
+        listed = provider.option_expiries(symbol)
+        if not listed:
+            return False, "skipped — no expiries"
+        target = min(listed, key=lambda e: abs((e - date.today()).days - 30))
+        chain = provider.option_chain(symbol, target)
+        if chain.is_empty:
+            return False, f"{target} returned nothing"
+        usable = chain.calls["implied_volatility"].notna().sum()
+        return True, (f"{target}: {len(chain.calls)} calls / {len(chain.puts)} puts, "
+                      f"{usable} with usable IV")
+    if expiries:
+        check("option chain", _chain)
+
+    # Once price history has failed, the source is almost certainly unreachable.
+    # `is_etf` and `next_earnings_date` degrade to False/None by design, which is
+    # right for the pipeline but would report a default here as if it were a
+    # measurement — "equity" when nothing was actually checked.
+    reachable = prices is not None and not prices.empty
+
+    if reachable:
+        check("fund check", lambda: (True, "ETF" if provider.is_etf(symbol) else "equity"))
+        check("earnings date", lambda: (
+            (True, str(provider.next_earnings_date(symbol)))
+            if provider.next_earnings_date(symbol)
+            else (False, "none published (normal for funds)")
+        ))
+    else:
+        print(f"  [skip] {'fund check':<26} data source unreachable — not checked")
+        print(f"  [skip] {'earnings date':<26} data source unreachable — not checked")
+
+    def _score():
+        config = db.load_active_config()
+        pipeline = RefreshPipeline(db, provider)
+        score = pipeline.score_ticker(symbol, config)
+        if score is None:
+            return False, "could not be scored"
+        counted = len(score.counted)
+        total = len(score.considered)
+        return counted > 0, (f"{score.composite:.1f}/100, {score.direction_label}, "
+                             f"{counted}/{total} parameters")
+    check("end-to-end score", _score)
+
+    print("  " + "-" * 52)
+    if failures == 0:
+        print(f"  All checks passed. `python -m screener refresh` should work.\n")
+    else:
+        print(f"  {failures} check(s) failed or warned.")
+        print("  A 403 or connection error on every check usually means the data")
+        print("  source is blocked by a network policy rather than broken.\n")
+    return 0 if failures == 0 else 1
 
 
 def _watchlist(args, db: Database) -> int:

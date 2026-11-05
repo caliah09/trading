@@ -125,10 +125,17 @@ class YFinanceProvider:
         return sorted(out)
 
     def option_chain(self, symbol: str, expiry: date) -> ChainSnapshot:
-        raw = self._retry(
-            f"option_chain({symbol}, {expiry})",
-            lambda: self._ticker(symbol).option_chain(expiry.strftime("%Y-%m-%d")),
-        )
+        def _fetch():
+            try:
+                return self._ticker(symbol).option_chain(expiry.strftime("%Y-%m-%d"))
+            except ValueError as exc:
+                # yfinance >= 1.0 raises ValueError for an expiry it does not
+                # list. Backing off and asking again cannot change that, so this
+                # returns rather than burning three attempts and ~7s of sleeps.
+                log.warning("Expiry %s is not listed for %s: %s", expiry, symbol, exc)
+                return None
+
+        raw = self._retry(f"option_chain({symbol}, {expiry})", _fetch)
         if raw is None:
             return ChainSnapshot(symbol=symbol, expiry=expiry)
         return ChainSnapshot(

@@ -1,7 +1,11 @@
 # Runtime dependencies for the local stock/options screener.
 # Pinned to major versions that are known to work together; bump deliberately.
 
-yfinance>=0.2.40         # price/volume history, options chains, earnings dates
+# Price/volume history, options chains, earnings dates.
+# Verified against 0.2.x and 1.8.0. tests/test_yfinance_contract.py asserts the
+# specific API surface the provider depends on, so an upgrade that moves it
+# fails loudly rather than at the first live fetch.
+yfinance>=0.2.40
 pandas>=2.0              # time series handling
 numpy>=1.24              # indicator math
 fastapi>=0.110           # local REST API
