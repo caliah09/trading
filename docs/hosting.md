@@ -105,6 +105,25 @@ and write the same SQLite file, which is how you corrupt it.
 5. **Settings → Networking → Generate Domain.**
 
 Railway assigns `$PORT` and terminates TLS, so nothing else needs configuring.
+`railway.json` in the repository points its health check at `/health` and pins
+one replica — two would each run the internal scheduler and write the same
+SQLite file, which is how you corrupt it.
+
+#### When the health check fails
+
+Build and Deploy succeeding while **Network → Healthcheck** fails means the app
+never answered on its port. Open the deploy logs; the cause is almost always one
+of these, and each has a distinct signature.
+
+| In the logs | Cause | Fix |
+|---|---|---|
+| `REFUSING TO START` | No password configured. The app will not bind a public address unprotected. | Set `SCREENER_PASSWORD_HASH` (or `SCREENER_PASSWORD`) and redeploy. |
+| `Cannot open the database at …` | The mounted volume is not writable. | Check the volume is mounted where `SCREENER_DB` points. |
+| Nothing after the startup banner | The health check is probing a path that redirects. `/` returns 303 to the login page. | Point the health check at `/health`, which is unauthenticated and returns 200. |
+| `ModuleNotFoundError` | Built from the wrong branch or without the Dockerfile. | Settings → Source → confirm the branch. |
+
+The health check must use `/health`. Every other route redirects to the login
+page when authentication is on, and a 3xx is not a pass.
 
 > **You do not need `RAILWAY_RUN_UID=0`.** Railway's deploy diagnosis suggests
 > it when the healthcheck fails with `unable to open database file`, and it does
