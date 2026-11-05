@@ -979,6 +979,52 @@ function renderSettings() {
   const general = el('div', 'field-group');
   general.append(el('h3', null, 'Watchlist and general'));
 
+  // Universe first: it decides whether the watchlist below is the candidate
+  // pool or just a list you also happen to keep.
+  const uniField = el('div', 'field');
+  uniField.append(el('label', null, 'Candidate universe'));
+  uniField.append(el('p', 'hint',
+    'What gets screened. Anything wider than your watchlist runs a two-stage scan: '
+    + 'the stock layer screens every candidate, then only the best are scored in '
+    + 'full and ranked.'));
+  const uniSelect = el('select');
+  uniSelect.id = 'set-universe';
+  ((state.meta && state.meta.universes) || []).forEach((u) => {
+    const opt = el('option', null, `${u.label} — ${u.size} symbols`);
+    opt.value = u.key;
+    if (u.key === config.universe) opt.selected = true;
+    uniSelect.append(opt);
+  });
+  uniField.append(uniSelect);
+  const chosen = ((state.meta && state.meta.universes) || [])
+    .find((u) => u.key === config.universe);
+  if (chosen) uniField.append(el('p', 'hint', chosen.note));
+  general.append(uniField);
+
+  const uniInline = el('div', 'inline-fields');
+  uniInline.append(numberField('set-scan-depth', 'Fully scored (scan depth)',
+    config.scan_depth, 1, 200, 1,
+    'How many survivors of the screen get options data and enter the ranking. '
+    + 'Options data is the expensive part, so this is the cost dial. Ignored when '
+    + 'your pool is already smaller than this.'));
+  uniInline.append(numberField('set-scan-floor', 'Liquidity floor ($ turnover)',
+    config.min_scan_dollar_volume, 0, 1000000000, 1000000,
+    'Names below this average daily turnover are dropped during a wide scan — '
+    + 'their options fail the chain filters anyway. Not applied to your watchlist.'));
+  general.append(uniInline);
+
+  const extraField = el('div', 'field');
+  extraField.append(el('label', null, 'Extra symbols'));
+  extraField.append(el('p', 'hint',
+    'Added to whichever universe is selected. Use this for anything missing from '
+    + 'a built-in list.'));
+  const extraInput = el('input');
+  extraInput.id = 'set-extra';
+  extraInput.type = 'text';
+  extraInput.value = (config.extra_symbols || []).join(', ');
+  extraField.append(extraInput);
+  general.append(extraField);
+
   const watchField = el('div', 'field');
   watchField.append(el('label', null, 'Tickers'));
   watchField.append(el('p', 'hint',
@@ -1137,6 +1183,11 @@ async function saveSettings() {
   const config = JSON.parse(JSON.stringify(state.config));
 
   config.watchlist = $('#set-watchlist').value
+    .split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
+  config.universe = $('#set-universe').value;
+  config.scan_depth = Number($('#set-scan-depth').value);
+  config.min_scan_dollar_volume = Number($('#set-scan-floor').value);
+  config.extra_symbols = $('#set-extra').value
     .split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
   config.top_n = Number($('#set-topn').value);
   config.posture = $('#set-posture').value;
