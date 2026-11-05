@@ -22,7 +22,7 @@ from screener.config import ScreenerConfig
 from screener.db import Database
 from screener.options_analysis import analyse_options
 from screener.performance import compute_forward_returns
-from screener.providers.base import MarketDataProvider
+from screener.providers.base import MarketDataProvider, fetch_price_history
 from screener.scoring.engine import (
     TickerScore,
     average_dollar_volume,
@@ -64,6 +64,14 @@ class RunSummary:
     failed: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
+    #: Wide-scan accounting. ``screened`` is how many candidates the stock
+    #: layer looked at; ``scored`` is the subset that survived into the
+    #: ranking. Equal for a plain watchlist run.
+    screened: int = 0
+    #: Dropped before the options layer, by reason. Reported rather than
+    #: silently discarded — "why is my ticker not in the list" needs an answer.
+    filtered: dict[str, str] = field(default_factory=dict)
+
     @property
     def duration_seconds(self) -> float:
         end = self.finished_at or datetime.now(timezone.utc)
@@ -80,6 +88,8 @@ class RunSummary:
             "scored": self.scored,
             "failed": self.failed,
             "warnings": self.warnings,
+            "screened": self.screened,
+            "filtered": self.filtered,
         }
 
 
@@ -99,15 +109,33 @@ class RefreshPipeline:
     # -- public API --------------------------------------------------------
 
     def run(self, config: ScreenerConfig, trigger: str = "manual") -> RunSummary:
-        """Score the whole watchlist and persist a new ranking."""
+        """Screen the candidate universe and persist a new ranking.
+
+        Two stages when the universe is wider than ``scan_depth``:
+
+        1. Fetch prices in bulk and score the *stock layer* for every
+           candidate. Cheap — one batched request covers hundreds of names.
+        2. Take the best ``scan_depth`` survivors and score them in full,
+           options layer included. Expensive — roughly four chain requests
+           each — so it is bought only for names that earned it.
+
+        Only stage-2 names enter the ranking. See ``ScreenerConfig.scan_depth``
+        for why this is a filter rather than partial scoring.
+        """
         started = datetime.now(timezone.utc)
         run_id = self.db.start_run(trigger, config, self.provider.name)
         summary = RunSummary(run_id=run_id, trigger=trigger, status="running",
                              started_at=started)
-        log.info("Run %s started (trigger=%s, %d tickers)", run_id, trigger, len(config.watchlist))
+
+        candidates = config.candidates()
+        summary.screened = len(candidates)
+        log.info("Run %s started (trigger=%s, universe=%s, %d candidates)",
+                 run_id, trigger, config.universe, len(candidates))
+
+        finalists = self._screen(candidates, config, summary)
 
         scores: list[TickerScore] = []
-        for symbol in config.watchlist:
+        for symbol in finalists:
             try:
                 score = self.score_ticker(symbol, config)
             except Exception as exc:
@@ -138,10 +166,18 @@ class RefreshPipeline:
 
         summary.status = "partial" if summary.failed else "ok"
         summary.finished_at = datetime.now(timezone.utc)
-        message = None
+
+        parts: list[str] = []
+        if summary.screened > len(summary.scored):
+            parts.append(
+                f"Screened {summary.screened} candidates, fully scored "
+                f"{len(summary.scored)}."
+            )
         if summary.failed:
-            message = "Skipped: " + "; ".join(f"{s} ({r})" for s, r in summary.failed.items())
-        self.db.finish_run(run_id, summary.status, message)
+            parts.append(
+                "Skipped: " + "; ".join(f"{s} ({r})" for s, r in summary.failed.items())
+            )
+        self.db.finish_run(run_id, summary.status, " ".join(parts) or None)
 
         # Fill in performance for older runs now that fresh prices are stored.
         try:
@@ -155,6 +191,100 @@ class RefreshPipeline:
                  run_id, summary.status, len(summary.scored), len(summary.failed),
                  summary.duration_seconds)
         return summary
+
+    # -- stage 1: the screen -----------------------------------------------
+
+    def _screen(self, candidates: list[str], config: ScreenerConfig,
+                summary: RunSummary) -> list[str]:
+        """Narrow the candidate pool to the names worth buying options data for.
+
+        Returns the candidates unchanged when the pool already fits inside
+        ``scan_depth``: a ten-name watchlist should not pay for a screening
+        pass that can only return all ten.
+        """
+        if len(candidates) <= config.scan_depth:
+            return candidates
+
+        log.info("Screening %d candidates down to %d", len(candidates), config.scan_depth)
+        prices = fetch_price_history(self.provider, candidates, COLD_FETCH_DAYS)
+
+        provisional: list[tuple[float, float, str]] = []
+        for symbol in candidates:
+            frame = prices.get(symbol)
+            if frame is None or frame.empty:
+                summary.filtered[symbol] = "No price history."
+                continue
+
+            self.db.upsert_prices(symbol, frame)
+            stored = self.db.get_prices(symbol)
+
+            turnover = average_dollar_volume(stored)
+            if config.min_scan_dollar_volume > 0 and (
+                turnover is None or turnover < config.min_scan_dollar_volume
+            ):
+                # Not a judgement about the company. Options on a thin name
+                # fail the chain hygiene filters anyway, so a chain request
+                # here buys a "no contract passed" message at full price.
+                summary.filtered[symbol] = (
+                    f"Average turnover {_money(turnover)} is below the "
+                    f"{_money(config.min_scan_dollar_volume)} scan floor."
+                )
+                continue
+
+            try:
+                score = self._stock_only_score(symbol, stored, config)
+            except Exception as exc:
+                log.warning("Screening %s failed: %s", symbol, exc)
+                summary.filtered[symbol] = f"Screen failed: {type(exc).__name__}: {exc}"
+                continue
+            if score is None:
+                summary.filtered[symbol] = "No directional signal could be computed."
+                continue
+
+            provisional.append((score, turnover or 0.0, symbol))
+
+        # Highest provisional score first; turnover breaks ties so the more
+        # tradeable of two equal candidates wins, and the symbol breaks the
+        # rest so the screen is deterministic across runs.
+        provisional.sort(key=lambda row: (-row[0], -row[1], row[2]))
+        finalists = [symbol for _, _, symbol in provisional[:config.scan_depth]]
+
+        for _, _, symbol in provisional[config.scan_depth:]:
+            summary.filtered[symbol] = "Screened out — outside the top candidates."
+
+        log.info("Screen kept %d of %d candidates", len(finalists), len(candidates))
+        return finalists
+
+    def _stock_only_score(self, symbol: str, prices: pd.DataFrame,
+                          config: ScreenerConfig) -> float | None:
+        """Composite from the stock layer alone, used to rank the screen.
+
+        Deliberately not stored or shown. It is computed on a different weight
+        basis from a full score — six parameters scaled to 100% instead of
+        eleven — so surfacing it next to real composites would invite exactly
+        the comparison it cannot support. It exists only to sort.
+        """
+        data = TickerData(
+            symbol=symbol,
+            prices=prices,
+            today=self.today,
+            earnings_date=None,
+            is_etf=False,
+            iv_history=[],
+        )
+        stock_results = score_stock_layer(data, config)
+        read = derive_direction(stock_results)
+        composed = compose(
+            symbol=symbol,
+            stock_results=stock_results,
+            options_results=[],
+            read=read,
+            config=config,
+            spot=data.spot,
+            dollar_volume=average_dollar_volume(prices),
+            options=None,
+        )
+        return composed.composite
 
     # -- per-ticker --------------------------------------------------------
 
@@ -261,6 +391,16 @@ class RefreshPipeline:
 
 def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _money(value: float | None) -> str:
+    """Compact dollar figure for operator-facing messages."""
+    if value is None:
+        return "unknown"
+    for limit, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(value) >= limit:
+            return f"${value / limit:.1f}{suffix}"
+    return f"${value:.0f}"
 
 
 def build_provider(name: str, today: date | None = None) -> MarketDataProvider:

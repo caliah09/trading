@@ -14,6 +14,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from screener.param_specs import ALL_SPECS, SPECS_BY_KEY, spec
+from screener.universe import (
+    UNIVERSE_NAMES,
+    WATCHLIST_UNIVERSE,
+    UnknownUniverse,
+)
+from screener.universe import resolve as resolve_universe
 
 Posture = Literal["buy", "sell"]
 
@@ -124,6 +130,42 @@ class ScreenerConfig:
     """The complete set of knobs that determine a ranking."""
 
     watchlist: list[str] = field(default_factory=lambda: list(DEFAULT_WATCHLIST))
+
+    #: Which candidate pool to screen. "watchlist" uses the list above; the
+    #: other names come from screener.universe. Widening this is a filter
+    #: change, not a scoring change: see scan_depth.
+    universe: str = WATCHLIST_UNIVERSE
+
+    #: Appended to whichever universe is selected, so a name missing from a
+    #: static snapshot can be included without editing the package.
+    extra_symbols: list[str] = field(default_factory=list)
+
+    #: How many survivors of the stock-layer screen get fully scored and enter
+    #: the ranking.
+    #:
+    #: THE TRADEOFF, STATED: options data is expensive — roughly four requests
+    #: per ticker against a rate-limited source — so it is not bought for every
+    #: name in a 550-ticker universe. The screen is therefore two-stage: score
+    #: the stock layer for everyone, keep the best `scan_depth`, then buy
+    #: options data only for those.
+    #:
+    #: The alternative — rank everything and enrich some of it — was rejected.
+    #: Weight redistribution means a stock-only name is scored across six
+    #: parameters scaled to 100% while an enriched name spreads the same 100%
+    #: across eleven. Those two numbers are not comparable, and interleaving
+    #: them in one ranked list would be quietly wrong. A filter keeps every
+    #: ranked entry scored on identical terms.
+    #:
+    #: Ignored when the universe is the watchlist and the watchlist is smaller
+    #: than this, which is the common case.
+    scan_depth: int = 25
+
+    #: Liquidity floor applied during a wide scan, in dollars of average daily
+    #: turnover. A name below this has options you cannot get filled on, so
+    #: spending chain requests on it is waste. Not applied to the watchlist
+    #: universe — if you explicitly listed a ticker, you meant it.
+    min_scan_dollar_volume: float = 5_000_000.0
+
     posture: Posture = "buy"
     top_n: int = 5
     parameters: dict[str, ParameterConfig] = field(default_factory=dict)
@@ -156,6 +198,7 @@ class ScreenerConfig:
                     thresholds=s.default_thresholds(),
                 )
         self.watchlist = normalise_watchlist(self.watchlist)
+        self.extra_symbols = normalise_watchlist(self.extra_symbols)
         self.validate()
 
     # -- validation --------------------------------------------------------
@@ -165,6 +208,19 @@ class ScreenerConfig:
             raise ConfigError(f"posture must be 'buy' or 'sell', got {self.posture!r}")
         if self.top_n < 1:
             raise ConfigError("top_n must be at least 1")
+        if self.universe not in UNIVERSE_NAMES:
+            raise ConfigError(
+                f"Unknown universe {self.universe!r}. Available: {', '.join(UNIVERSE_NAMES)}"
+            )
+        if self.scan_depth < 1:
+            raise ConfigError("scan_depth must be at least 1")
+        if self.min_scan_dollar_volume < 0:
+            raise ConfigError("min_scan_dollar_volume cannot be negative")
+        if self.universe == WATCHLIST_UNIVERSE and not self.watchlist and not self.extra_symbols:
+            raise ConfigError(
+                "The watchlist universe is selected but the watchlist is empty. "
+                "Add a ticker, or choose a wider universe."
+            )
         unknown = set(self.parameters) - set(SPECS_BY_KEY)
         if unknown:
             raise ConfigError(f"Unknown parameters in config: {sorted(unknown)}")
@@ -187,6 +243,22 @@ class ScreenerConfig:
     def target(self) -> ContractTarget:
         """The contract target for the currently selected posture."""
         return self.buy_target if self.posture == "buy" else self.sell_target
+
+    def candidates(self) -> list[str]:
+        """Every symbol this config wants screened, in a stable order."""
+        try:
+            return resolve_universe(self.universe, self.watchlist, self.extra_symbols)
+        except UnknownUniverse as exc:  # pragma: no cover - validate() blocks this
+            raise ConfigError(str(exc)) from exc
+
+    @property
+    def is_wide_scan(self) -> bool:
+        """True when the candidate pool is larger than what gets fully scored.
+
+        Drives whether the liquidity floor applies and whether the run reports
+        how many names were screened but not ranked.
+        """
+        return len(self.candidates()) > self.scan_depth
 
     def apply_preset(self, name: str) -> "ScreenerConfig":
         """Return a copy with weights replaced by a named preset.
@@ -262,10 +334,13 @@ class ScreenerConfig:
         known = {f for f in cls.__dataclass_fields__}
         scalars = {
             k: v for k, v in data.items()
-            if k in known and k not in {"parameters", "buy_target", "sell_target", "watchlist"}
+            if k in known and k not in {
+                "parameters", "buy_target", "sell_target", "watchlist", "extra_symbols",
+            }
         }
         return cls(
             watchlist=list(data.get("watchlist") or DEFAULT_WATCHLIST),
+            extra_symbols=list(data.get("extra_symbols") or ()),
             parameters=params,
             buy_target=_target(data.get("buy_target"), DEFAULT_BUY_TARGET),
             sell_target=_target(data.get("sell_target"), DEFAULT_SELL_TARGET),

@@ -110,6 +110,44 @@ class YFinanceProvider:
             return empty_price_frame()
         return _normalise_prices(raw)
 
+    def price_history_batch(self, symbols: list[str],
+                            lookback_days: int) -> dict[str, pd.DataFrame]:
+        """Fetch many symbols in one call via ``yf.download``.
+
+        This is the whole reason a wide scan is feasible. One request per
+        ticker against a rate-limited source puts a 500-name screen at roughly
+        an hour and well into throttling territory; batched, it is minutes.
+
+        yfinance chunks internally and returns a MultiIndex frame keyed by
+        ticker. Splitting that back into per-symbol frames is the fiddly part,
+        and it is factored into ``split_batch_frame`` so it can be tested
+        without a network call.
+        """
+        symbols = [s for s in symbols if s]
+        if not symbols:
+            return {}
+
+        import yfinance as yf  # lazy, matching _ticker: tests need not install it
+
+        raw = self._retry(
+            f"price_history_batch({len(symbols)} symbols)",
+            lambda: yf.download(
+                tickers=symbols,
+                period=f"{max(lookback_days, 5)}d",
+                interval="1d",
+                auto_adjust=True,
+                actions=False,
+                group_by="ticker",
+                threads=True,
+                progress=False,
+            ),
+        )
+        if raw is None or not isinstance(raw, pd.DataFrame) or raw.empty:
+            log.warning("Batch price fetch returned nothing for %d symbols.", len(symbols))
+            return {s: empty_price_frame() for s in symbols}
+
+        return split_batch_frame(raw, symbols)
+
     # -- options -----------------------------------------------------------
 
     def option_expiries(self, symbol: str) -> list[date]:
@@ -267,3 +305,48 @@ def _iter_calendar_dates(cal) -> list[date]:
         if pd.notna(ts):
             found.append(ts.date())
     return sorted(found)
+
+
+def split_batch_frame(raw: pd.DataFrame, symbols: list[str]) -> dict[str, pd.DataFrame]:
+    """Split a ``yf.download`` multi-ticker frame into per-symbol frames.
+
+    The response shape depends on how many tickers were asked for and how many
+    came back, which is why this is isolated and tested directly:
+
+    * many tickers  -> MultiIndex columns of (ticker, field)
+    * one ticker    -> flat columns, no ticker level at all
+    * partial fill  -> a requested ticker is simply absent from the columns
+
+    Every requested symbol gets an entry. A symbol that is missing, or whose
+    rows are entirely NaN because Yahoo accepted the ticker but had no data,
+    maps to an empty frame — callers should not have to tell those apart.
+    """
+    out: dict[str, pd.DataFrame] = {}
+
+    if not isinstance(raw.columns, pd.MultiIndex):
+        # Single surviving ticker: yfinance drops the ticker level entirely.
+        if len(symbols) == 1:
+            try:
+                out[symbols[0]] = _normalise_prices(raw)
+            except ProviderError:
+                log.warning("Unexpected schema in batch response for %s", symbols[0])
+                out[symbols[0]] = empty_price_frame()
+            return out
+        log.warning(
+            "Batch response had flat columns for %d symbols; cannot attribute rows.",
+            len(symbols),
+        )
+        return {s: empty_price_frame() for s in symbols}
+
+    available = set(raw.columns.get_level_values(0))
+    for symbol in symbols:
+        if symbol not in available:
+            out[symbol] = empty_price_frame()
+            continue
+        try:
+            frame = raw[symbol].dropna(how="all")
+            out[symbol] = _normalise_prices(frame) if not frame.empty else empty_price_frame()
+        except (ProviderError, KeyError, ValueError):
+            log.warning("Could not normalise batch rows for %s", symbol, exc_info=True)
+            out[symbol] = empty_price_frame()
+    return out

@@ -13,16 +13,20 @@ numbers came from, and the test suite never touches the network.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Protocol, runtime_checkable
 
 import pandas as pd
 
+log = logging.getLogger(__name__)
+
 __all__ = [
     "PRICE_COLUMNS", "CHAIN_COLUMNS",
     "ChainSnapshot", "ProviderError", "MarketDataProvider",
     "empty_price_frame", "empty_chain_frame",
+    "fetch_price_history", "sequential_price_history",
 ]
 
 #: Normalised price history schema. Providers must return exactly these columns,
@@ -91,6 +95,22 @@ class MarketDataProvider(Protocol):
         """
         ...
 
+    def price_history_batch(self, symbols: list[str],
+                            lookback_days: int) -> dict[str, pd.DataFrame]:
+        """Daily OHLCV for many symbols at once.
+
+        Optional. A provider that cannot batch should not implement this —
+        ``sequential_price_history`` below is the fallback, and the pipeline
+        uses it automatically. Implementing it matters only for wide scans,
+        where one request per ticker is the difference between three minutes
+        and an hour.
+
+        Must return one entry per requested symbol. A symbol with no data maps
+        to an empty frame rather than being omitted, so callers never have to
+        distinguish "absent" from "failed".
+        """
+        ...
+
     def option_expiries(self, symbol: str) -> list[date]:
         """Available expiration dates, ascending. Empty when no chain exists."""
         ...
@@ -115,3 +135,52 @@ class MarketDataProvider(Protocol):
         rather than as a data gap.
         """
         ...
+
+
+def sequential_price_history(provider: MarketDataProvider, symbols: list[str],
+                             lookback_days: int) -> dict[str, pd.DataFrame]:
+    """Fallback batch fetch: one request per symbol, failures contained.
+
+    Used for any provider that does not implement ``price_history_batch``, and
+    as the recovery path when a provider's batch call raises. A batch request
+    is all-or-nothing at the transport level, so one malformed symbol can take
+    down the whole response — dropping back to sequential turns that into a
+    handful of empty frames instead of a failed run.
+    """
+    out: dict[str, pd.DataFrame] = {}
+    for symbol in symbols:
+        try:
+            out[symbol] = provider.price_history(symbol, lookback_days)
+        except Exception:
+            log.warning("Price fetch failed for %s", symbol, exc_info=True)
+            out[symbol] = empty_price_frame()
+    return out
+
+
+def fetch_price_history(provider: MarketDataProvider, symbols: list[str],
+                        lookback_days: int) -> dict[str, pd.DataFrame]:
+    """Batch-fetch if the provider supports it, otherwise fetch one at a time.
+
+    Always returns an entry for every requested symbol. A provider whose batch
+    call succeeds but omits symbols has those filled in sequentially, because a
+    partial batch is a common shape of upstream throttling and is not worth
+    failing over.
+    """
+    if not symbols:
+        return {}
+
+    batch = getattr(provider, "price_history_batch", None)
+    if batch is None:
+        return sequential_price_history(provider, symbols, lookback_days)
+
+    try:
+        fetched = batch(list(symbols), lookback_days)
+    except Exception:
+        log.warning("Batch price fetch failed; falling back to sequential.", exc_info=True)
+        return sequential_price_history(provider, symbols, lookback_days)
+
+    missing = [s for s in symbols if s not in fetched]
+    if missing:
+        log.info("Batch fetch omitted %d symbol(s); fetching those individually.", len(missing))
+        fetched.update(sequential_price_history(provider, missing, lookback_days))
+    return fetched
