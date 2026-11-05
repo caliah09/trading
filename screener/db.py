@@ -603,6 +603,64 @@ class Database:
                 item["parameters"] = [dict(p) for p in params]
         return outcomes
 
+    # -- maintenance -------------------------------------------------------
+
+    def prune(self, keep_runs: int = 120, vacuum: bool = True) -> dict:
+        """Drop old runs so the database stays a bounded size.
+
+        Each run stores a parameter breakdown per ticker — explanations
+        included — which is roughly 135 KB per run for a ten-ticker watchlist.
+        Twice-daily refreshes would reach ~66 MB a year, so scheduled runs need
+        this.
+
+        **Runs carrying a decision are never pruned.** ``decisions`` has a
+        cascading foreign key to ``runs``, so deleting an old run would
+        silently take the journal entry with it — and those are the only
+        records here that cannot be regenerated.
+
+        Prices, implied-volatility history, earnings dates and config snapshots
+        are all kept: they are small, and the IV series must accumulate for a
+        year before IV Rank can stop using its proxy.
+        """
+        if keep_runs < 1:
+            raise ValueError(f"keep_runs must be at least 1, got {keep_runs}")
+
+        with self.connect() as conn:
+            before = conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            protected = conn.execute(
+                "SELECT COUNT(DISTINCT run_id) FROM decisions"
+            ).fetchone()[0]
+
+            cursor = conn.execute(
+                "DELETE FROM runs WHERE id NOT IN ("
+                "    SELECT id FROM runs ORDER BY started_at DESC, id DESC LIMIT ?"
+                ") AND id NOT IN (SELECT DISTINCT run_id FROM decisions)",
+                (keep_runs,),
+            )
+            deleted = cursor.rowcount
+            after = conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+
+        if vacuum and deleted:
+            # VACUUM cannot run inside a transaction, so it gets its own
+            # connection. Without it the file keeps the freed pages and the
+            # committed blob never actually shrinks.
+            conn = sqlite3.connect(self.path, timeout=60.0)
+            try:
+                conn.execute("VACUUM")
+            finally:
+                conn.close()
+
+        result = {
+            "runs_before": before,
+            "runs_after": after,
+            "deleted": deleted,
+            "protected_by_decisions": protected,
+            "size_bytes": self.path.stat().st_size if self.path.exists() else 0,
+        }
+        log.info("Pruned %d run(s); %d remain (%d protected by decisions)",
+                 deleted, after, protected)
+        return result
+
     def run_entries_for_returns(self, run_id: int) -> list[dict]:
         with self.connect() as conn:
             rows = conn.execute(

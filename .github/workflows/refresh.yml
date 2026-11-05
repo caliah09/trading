@@ -1,0 +1,166 @@
+# Refresh the screener against live market data.
+#
+# WHY THIS EXISTS
+# ---------------
+# The dashboard schedules its own refreshes, but an in-process scheduler only
+# fires while the app is running. This workflow does the fetching on GitHub's
+# runners instead, so rankings stay current whether or not your machine is on.
+# You pull the result; the app becomes a viewer over data that refreshes itself.
+#
+# WHERE THE DATA GOES
+# -------------------
+# The database is force-pushed as a SINGLE COMMIT to the `screener-data`
+# branch, rebuilt from scratch each run. A ten-ticker refresh adds ~135 KB to
+# the database, so committing twice daily into normal history would reach ~66 MB
+# of content a year and far more in git objects, since a binary blob cannot be
+# delta-compressed. Rebuilding a one-commit branch keeps only the latest blob.
+# The history of rankings lives *inside* the SQLite file, not in git history.
+#
+# DAYLIGHT SAVING
+# ---------------
+# GitHub cron is UTC-only. Each slot therefore fires at both US Eastern
+# offsets, and `screener gate` skips the one that lands at the wrong local
+# time. It also skips weekends and market holidays.
+
+name: Refresh rankings
+
+on:
+  schedule:
+    # Market open, 09:35 ET — 13:35 UTC during EDT, 14:35 UTC during EST.
+    - cron: '35 13 * * 1-5'
+    - cron: '35 14 * * 1-5'
+    # Market close, 16:10 ET — 20:10 UTC during EDT, 21:10 UTC during EST.
+    - cron: '10 20 * * 1-5'
+    - cron: '10 21 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Run even outside a market window'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+# Never let two refreshes write the data branch at once.
+concurrency:
+  group: screener-refresh
+  cancel-in-progress: false
+
+env:
+  DB_PATH: data/screener.sqlite
+  DATA_BRANCH: screener-data
+  # Yahoo throttles shared CI addresses harder than a home connection.
+  SCREENER_REQUEST_PAUSE: '0.6'
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out the screener
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      # Installed before the gate because `screener` imports pandas at module
+      # load. The pip cache makes this quick on the slots that then skip.
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Decide whether this slot should run
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+             && [ "${{ inputs.force }}" = "true" ]; then
+            echo "Manual run — skipping the window check."
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 13:35 and 20:10 UTC are the EDT slots; 14:35 and 21:10 are EST.
+          case "${{ github.event.schedule }}" in
+            '35 13 * * 1-5'|'35 14 * * 1-5') WINDOW=open ;;
+            *)                               WINDOW=close ;;
+          esac
+
+          if python -m screener gate --window "$WINDOW"; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore the existing database
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          mkdir -p data
+          if git fetch --depth 1 origin "$DATA_BRANCH" 2>/dev/null; then
+            git show "origin/$DATA_BRANCH:$DB_PATH" > "$DB_PATH"
+            echo "Restored $(du -h "$DB_PATH" | cut -f1) of history."
+          else
+            echo "No data branch yet — starting a fresh database."
+            echo "Note: IV Rank uses its realised-volatility proxy until ~60"
+            echo "implied-volatility snapshots accumulate."
+          fi
+
+      - name: Probe the data source
+        if: steps.gate.outputs.proceed == 'true'
+        continue-on-error: true
+        run: python -m screener --db "$DB_PATH" doctor
+
+      - name: Refresh rankings
+        if: steps.gate.outputs.proceed == 'true'
+        run: python -m screener -v --db "$DB_PATH" refresh
+
+      - name: Prune old runs
+        if: steps.gate.outputs.proceed == 'true'
+        run: python -m screener --db "$DB_PATH" prune --keep 120
+
+      - name: Export a readable summary
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          python -m screener --db "$DB_PATH" export \
+            --format markdown --output data/latest-ranking.md
+          python -m screener --db "$DB_PATH" export \
+            --format json --output data/latest-ranking.json
+
+      - name: Publish to the data branch
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Built in a scratch repository so the branch is always exactly one
+          # commit. Pushing into real history would accumulate a new copy of
+          # the binary on every run.
+          # Mirrors the repository layout: files sit under data/ on the branch
+          # too, so the restore step and scripts/pull_data.sh use the same paths.
+          STAGING="$(mktemp -d)"
+          mkdir -p "$STAGING/data"
+          cp "$DB_PATH" data/latest-ranking.md data/latest-ranking.json "$STAGING/data/"
+
+          cd "$STAGING"
+          git init --quiet
+          git checkout --quiet -b "$DATA_BRANCH"
+          git add -A
+          git -c user.name='screener-bot' \
+              -c user.email='screener-bot@users.noreply.github.com' \
+              commit --quiet -m "Rankings as of $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git push --force --quiet \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "$DATA_BRANCH"
+          echo "Published to $DATA_BRANCH."
+
+      - name: Summarise
+        if: steps.gate.outputs.proceed == 'true'
+        run: cat data/latest-ranking.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report a skipped slot
+        if: steps.gate.outputs.proceed != 'true'
+        run: |
+          echo "Outside the market window, or not a trading session." \
+            >> "$GITHUB_STEP_SUMMARY"

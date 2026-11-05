@@ -15,6 +15,7 @@ import argparse
 import json
 import logging
 import sys
+from datetime import datetime, time
 from pathlib import Path
 
 from screener.config import ScreenerConfig
@@ -73,6 +74,23 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--symbol", default="AAPL",
                         help="Ticker to probe (default: AAPL)")
 
+    prune = sub.add_parser("prune", help="Drop old runs so the database stays bounded")
+    prune.add_argument("--keep", type=int, default=120,
+                       help="Runs to retain (default: 120). Runs carrying a "
+                            "decision are always kept.")
+    prune.add_argument("--no-vacuum", action="store_true",
+                       help="Skip VACUUM — faster, but the file will not shrink")
+
+    gate = sub.add_parser(
+        "gate",
+        help="Exit 0 if a scheduled refresh should run now, 1 if it should be skipped",
+    )
+    gate.add_argument("--window", required=True, choices=("open", "close"))
+
+    export = sub.add_parser("export", help="Write the latest ranking as JSON or Markdown")
+    export.add_argument("--format", default="markdown", choices=("markdown", "json"))
+    export.add_argument("--output", type=Path, help="File to write (default: stdout)")
+
     watch = sub.add_parser("watchlist", help="Show or replace the watchlist")
     watch.add_argument("symbols", nargs="*", help="Replace the watchlist with these symbols")
 
@@ -82,6 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _configure_logging(args.verbose)
+
+    # `gate` only asks what time it is, so it must not create a database as a
+    # side effect — it runs before the database is restored in CI.
+    if args.command == "gate":
+        return _gate(args)
+
     db = Database(args.db)
 
     if args.command == "serve":
@@ -92,6 +116,10 @@ def main(argv: list[str] | None = None) -> int:
         return _status(db)
     if args.command == "doctor":
         return _doctor(args, db)
+    if args.command == "prune":
+        return _prune(args, db)
+    if args.command == "export":
+        return _export(args, db)
     if args.command == "watchlist":
         return _watchlist(args, db)
     return 1
@@ -270,6 +298,128 @@ def _doctor(args, db: Database) -> int:
         print("  A 403 or connection error on every check usually means the data")
         print("  source is blocked by a network policy rather than broken.\n")
     return 0 if failures == 0 else 1
+
+
+#: How long after a scheduled slot a run is still accepted. GitHub Actions cron
+#: is routinely 5-15 minutes late and occasionally much worse, so the window is
+#: generous. It is also what makes the schedule daylight-saving-safe: the
+#: workflow fires at both UTC offsets and the wrong one falls outside the window.
+GATE_WINDOWS = {
+    "open": (time(9, 30), time(11, 30)),
+    "close": (time(16, 0), time(18, 0)),
+}
+
+
+def _gate(args) -> int:
+    """Decide whether a scheduled refresh should proceed. Exit 0 = yes."""
+    from zoneinfo import ZoneInfo
+
+    from screener.market_calendar import is_trading_day
+
+    # ZoneInfo directly rather than screener.scheduler.MARKET_TZ: that module
+    # imports APScheduler, and this check has no reason to need a scheduler.
+    now = datetime.now(ZoneInfo("America/New_York"))
+    start, end = GATE_WINDOWS[args.window]
+
+    if not is_trading_day(now.date()):
+        print(f"skip: {now:%Y-%m-%d} is not a trading session")
+        return 1
+    if not (start <= now.time() <= end):
+        print(f"skip: {now:%H:%M %Z} is outside the {args.window} window "
+              f"({start:%H:%M}-{end:%H:%M} ET)")
+        return 1
+
+    print(f"run: {now:%Y-%m-%d %H:%M %Z} is inside the {args.window} window")
+    return 0
+
+
+def _prune(args, db: Database) -> int:
+    result = db.prune(keep_runs=args.keep, vacuum=not args.no_vacuum)
+    print(f"  Runs {result['runs_before']} -> {result['runs_after']} "
+          f"({result['deleted']} removed, {result['protected_by_decisions']} "
+          f"protected by decisions)")
+    print(f"  Database now {result['size_bytes'] / 1024:.0f} KB")
+    return 0
+
+
+def _export(args, db: Database) -> int:
+    """Write the latest ranking in a form that reads well outside the app."""
+    run = db.latest_run(only_successful=True)
+    if run is None:
+        print("No ranking to export.", file=sys.stderr)
+        return 1
+
+    entries = db.get_ranking(run["id"])
+    config = db.load_active_config()
+
+    if args.format == "json":
+        payload = json.dumps({"run": run, "entries": entries}, indent=2, default=str)
+    else:
+        payload = _markdown_report(run, entries, config)
+
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload)
+        print(f"Wrote {args.output}")
+    else:
+        print(payload)
+    return 0
+
+
+def _markdown_report(run: dict, entries: list[dict], config) -> str:
+    """A ranking rendered for reading on GitHub."""
+    from screener.api.app import DISCLAIMER
+
+    top_n = config.top_n
+    lines = [
+        f"# Rankings — {run['started_at'][:16].replace('T', ' ')} UTC",
+        "",
+        f"Run {run['id']} · trigger `{run['trigger']}` · config `{run['fingerprint'][:8]}` · "
+        f"posture **{'selling premium' if run['posture'] == 'sell' else 'buying premium'}** · "
+        f"{len(entries)} tickers",
+        "",
+        f"> {DISCLAIMER}",
+        "",
+        "| # | Ticker | Score | Lean | Data | Last |",
+        "|---|--------|------:|------|------|-----:|",
+    ]
+    for entry in entries:
+        marker = "**" if entry["rank"] <= top_n else ""
+        spot = f"${entry['spot']:,.2f}" if entry.get("spot") else "—"
+        lines.append(
+            f"| {entry['rank']} | {marker}{entry['symbol']}{marker} | "
+            f"{entry['composite']:.1f} | {entry['direction_label']} | "
+            f"{entry['completeness']} | {spot} |"
+        )
+
+    lines += ["", f"## Top {min(top_n, len(entries))} — why", ""]
+    for entry in entries[:top_n]:
+        lines.append(f"### {entry['rank']}. {entry['symbol']} — "
+                     f"{entry['composite']:.1f} — {entry['direction_label']}")
+        lines.append("")
+        if entry.get("contract"):
+            contract = entry["contract"]
+            lines.append(
+                f"Suggested contract: **{contract['strike']} {contract['kind']}** "
+                f"exp {contract['expiry']} ({contract['dte']}d), "
+                f"delta {float(contract['delta']):+.2f}, mid ${float(contract['mid']):.2f}"
+            )
+            lines.append("")
+
+        scored = [p for p in entry["parameters"] if p["status"] == "ok"]
+        scored.sort(key=lambda p: abs(p["contribution"]), reverse=True)
+        for param in scored[:4]:
+            lines.append(f"- **{param['label']}** `{param['display_value']}` "
+                         f"→ {param['contribution']:+.2f} — {param['explanation']}")
+
+        missing = [p for p in entry["parameters"] if p["status"] != "ok"]
+        if missing:
+            lines.append("")
+            for param in missing:
+                lines.append(f"- _{param['label']}: {param['explanation']}_")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 def _watchlist(args, db: Database) -> int:

@@ -270,8 +270,16 @@ def build_provider(name: str, today: date | None = None) -> MarketDataProvider:
     network access at all.
     """
     if name == "yfinance":
+        import os
+
         from screener.providers.yfinance_provider import YFinanceProvider
-        return YFinanceProvider()
+
+        # Shared-IP environments such as CI runners get throttled by Yahoo far
+        # harder than a home connection, and throttling surfaces as empty
+        # frames rather than an error. SCREENER_REQUEST_PAUSE spaces the calls
+        # out without needing a code change.
+        pause = float(os.environ.get("SCREENER_REQUEST_PAUSE", "0") or 0)
+        return YFinanceProvider(request_pause=pause)
     if name == "synthetic":
         from screener.providers.synthetic import SyntheticProvider
         return SyntheticProvider(today=today)

@@ -193,6 +193,43 @@ dashboard header always shows the last refresh and the next scheduled one, and
 > launching on Monday morning gives you current data rather than Friday's. It
 > cannot reconstruct a ranking *as of* a moment that has passed, because the
 > market data for that moment is gone. Disable with `serve --no-catch-up`.
+>
+> **Or remove the tradeoff entirely** with the GitHub Actions refresh below,
+> which fetches on a schedule whether or not your machine is on.
+
+### Refreshing in GitHub Actions
+
+`.github/workflows/refresh.yml` runs the pipeline on GitHub's runners at market
+open and close, so rankings stay current with the app closed. Your local app
+becomes a viewer over data that refreshes itself.
+
+```bash
+./scripts/pull_data.sh      # fetch the latest published database
+python -m screener serve
+```
+
+Nothing to configure — yfinance needs no API key, and the workflow uses the
+built-in `GITHUB_TOKEN`. Trigger the first run manually from the Actions tab
+("Refresh rankings" → Run workflow), which also creates the data branch.
+
+**How the data is published.** A ten-ticker refresh adds roughly 135 KB to the
+database, so committing twice daily into normal history would reach ~66 MB of
+content a year — and far more in git objects, since a binary blob cannot be
+delta-compressed. Instead the workflow force-pushes a **single-commit**
+`screener-data` branch, rebuilt from scratch each run, so git retains only the
+latest copy. The history of rankings lives *inside* the SQLite file. The runs
+table is pruned to the most recent 120, except any run carrying a journal
+decision, which is never pruned.
+
+**Daylight saving.** GitHub cron is UTC-only, so each slot fires at both US
+Eastern offsets and `screener gate` skips the one landing at the wrong local
+time. It also skips weekends and market holidays.
+
+**Caveats.** Actions cron can run 5–15 minutes late, occasionally worse — the
+gate windows are wide enough to absorb that. Make the repository **private**
+unless you want your watchlist public. And `pull_data.sh` overwrites your local
+database, so it refuses to clobber one that is newer than the published copy
+(your journal decisions live in that file); pass `--force` to override.
 
 Refreshes are serialised behind a lock. A second request while one is running
 gets `409 Conflict` rather than starting an overlapping writer.
