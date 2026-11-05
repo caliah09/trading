@@ -32,7 +32,10 @@ from screener.config import (
 )
 from screener.db import DEFAULT_DB_PATH, Database
 from screener.journal import DEFAULT_HORIZON, calibrate
+from screener.param_docs import deep_dive
 from screener.param_specs import ALL_SPECS
+from screener.universe import UNIVERSE_NAMES
+from screener.universe import describe as describe_universe
 from screener.performance import HORIZONS, summarise_run_performance
 from screener.portfolio import DEFAULT_WINDOW, analyse_concentration
 from screener.scheduler import RefreshBusy, RefreshService
@@ -172,6 +175,7 @@ def create_app(
     @app.get("/api/meta")
     def meta() -> dict:
         """Disclaimer, parameter registry, and horizons — everything the UI needs to render."""
+        config = db.load_active_config()
         return {
             "disclaimer": DISCLAIMER,
             "horizons": list(HORIZONS),
@@ -184,8 +188,17 @@ def create_app(
                     "default_weight": s.default_weight,
                     "posture_aware": s.posture_aware,
                     "thresholds": [asdict(t) for t in s.thresholds],
+                    # The drill-down layer: what it measures, what would change
+                    # it, and what the research does and does not support. Sent
+                    # with the registry rather than per-ranking because it is
+                    # the same for every ticker and every run.
+                    "deep_dive": (deep_dive(s.key).to_dict() if deep_dive(s.key) else None),
                 }
                 for s in ALL_SPECS
+            ],
+            "universes": [
+                describe_universe(name, config.watchlist, config.extra_symbols)
+                for name in UNIVERSE_NAMES
             ],
         }
 

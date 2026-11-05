@@ -153,11 +153,26 @@ function renderRankings() {
     return;
   }
 
+  /* Discrete chips rather than one run-on line: each fact is separately
+     scannable, and the one that is wrong is the one you need to spot. */
   const run = data.run || {};
-  banner.append(el('span', null,
-    `Run ${run.id} · ${formatTimestamp(run.started_at)} · ${run.trigger} · ${data.entries.length} tickers · posture: ${run.posture === 'sell' ? 'selling premium' : 'buying premium'}`));
+  banner.append(el('span', 'cfg-tag',
+    `RUN ${run.id} · ${formatTimestamp(run.started_at)}`));
+  banner.append(el('span', 'cfg-tag', String(run.trigger || '').toUpperCase()));
+  banner.append(el('span', 'cfg-tag', `${data.entries.length} RANKED`));
+  banner.append(el('span', 'cfg-tag',
+    run.posture === 'sell' ? 'SELLING PREMIUM' : 'BUYING PREMIUM'));
+
+  const universe = state.config && state.config.universe;
+  if (universe && universe !== 'watchlist') {
+    const u = el('span', 'cfg-tag', `UNIVERSE: ${String(universe).toUpperCase()}`);
+    u.title = 'A wide scan: the stock layer screened the whole universe, and only '
+      + 'the survivors were scored in full and ranked here.';
+    banner.append(u);
+  }
+
   const tag = el('span', 'cfg-tag' + (run.is_current_config ? '' : ' is-different'),
-    `config ${String(run.fingerprint || '').slice(0, 8)}`);
+    `CONFIG ${String(run.fingerprint || '').slice(0, 8)}`);
   tag.title = run.is_current_config
     ? 'Produced with your current settings.'
     : 'Produced with different settings from your current ones. Refresh to re-rank.';
@@ -236,7 +251,7 @@ function rankRow(entry, maxScore, isTop, runId) {
 
   const scoreCell = el('span', 'score-cell');
   const track = el('span', 'score-track');
-  const fill = el('span', 'score-fill');
+  const fill = el('span', `score-fill lean-${entry.direction || 'neutral'}`);
   fill.style.width = `${Math.max(2, (entry.composite / maxScore) * 100)}%`;
   track.append(fill);
   scoreCell.append(track);
@@ -347,82 +362,193 @@ function openDetail(entry, runId) {
   $('#detail-close').focus();
 }
 
-function parameterTable(entry) {
-  const table = el('table', 'param-table');
-  const thead = el('thead');
-  const headRow = el('tr');
-  ['Parameter', 'Value', 'Weight', 'Contribution', 'What it means'].forEach((label) => {
-    headRow.append(el('th', null, label));
-  });
-  thead.append(headRow);
-  table.append(thead);
+/* ------------------------------------------------- parameter breakdown */
 
-  const tbody = el('tbody');
+/* Three levels of depth, each one click from the last:
+ *
+ *   row        — what it measured and what it contributed
+ *   expanded   — why, in plain language, plus the arithmetic
+ *   deep-dive  — the mechanism, what would change it, what the evidence says
+ *
+ * The third level is static registry prose from /api/meta, not something
+ * computed per ticker, so expanding a row costs no request. The whole point
+ * is that a number on this page can be understood without asking anyone. */
+
+function specFor(key) {
+  const params = (state.meta && state.meta.parameters) || [];
+  return params.find((p) => p.key === key) || null;
+}
+
+function parameterTable(entry) {
+  const wrap = el('div', 'param-table');
   const params = entry.parameters || [];
   const maxAbs = Math.max(0.01, ...params.map((p) => Math.abs(p.contribution || 0)));
 
   params.forEach((param) => {
-    const row = el('tr', param.status === 'ok' ? '' : 'is-missing');
+    const ok = param.status === 'ok';
+    const row = el('button', `param-row${ok ? '' : ' is-dead'}`);
+    row.type = 'button';
+    row.setAttribute('aria-expanded', 'false');
 
-    const nameCell = el('td');
-    nameCell.append(el('div', 'param-name', param.label));
-    nameCell.append(el('div', 'param-layer',
-      param.layer === 'stock' ? 'stock layer' : 'options layer'));
-    if (param.status !== 'ok') {
-      const pill = el('span', 'status-pill warn',
-        param.status === 'not_applicable' ? 'n/a' : 'no data');
-      nameCell.append(pill);
-    }
-    row.append(nameCell);
+    const caret = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    caret.setAttribute('class', 'param-caret');
+    caret.setAttribute('width', '12');
+    caret.setAttribute('height', '12');
+    caret.setAttribute('viewBox', '0 0 24 24');
+    caret.setAttribute('fill', 'none');
+    caret.setAttribute('stroke', 'currentColor');
+    caret.setAttribute('stroke-width', '2.6');
+    caret.setAttribute('stroke-linecap', 'round');
+    caret.setAttribute('stroke-linejoin', 'round');
+    caret.setAttribute('aria-hidden', 'true');
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', 'M9 18l6-6-6-6');
+    caret.append(path);
+    row.append(caret);
 
-    row.append(el('td', 'param-value', param.status === 'ok' ? param.display_value : '—'));
-
-    const weightCell = el('td', 'param-value');
-    if (param.status === 'ok') {
-      weightCell.textContent = `${param.weight}`;
-      weightCell.title = `${param.effective_weight.toFixed(1)}% of the score after redistribution`;
-    } else {
-      weightCell.textContent = `${param.weight}`;
-      weightCell.title = 'Weight redistributed across the parameters that did compute.';
-    }
-    row.append(weightCell);
-
+    row.append(el('span', 'param-name', param.label));
+    row.append(el('span', 'param-value', ok ? param.display_value : statusWord(param.status)));
     row.append(contributionCell(param, maxAbs));
-    row.append(el('td', 'param-why', param.explanation || ''));
-    tbody.append(row);
+
+    const why = el('div', 'param-drill');
+    why.hidden = true;
+    why.append(whyContent(param, entry));
+
+    row.addEventListener('click', () => {
+      const open = why.hidden;
+      why.hidden = !open;
+      row.classList.toggle('is-open', open);
+      row.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+
+    wrap.append(row);
+    wrap.append(why);
   });
 
   /* The breakdown literally adds up to the composite — show that. */
-  const totalRow = el('tr', 'total-row');
-  totalRow.append(el('td', null, 'Composite'));
-  totalRow.append(el('td', null, ''));
-  totalRow.append(el('td', null, ''));
-  const totalCell = el('td', 'contrib-cell');
-  totalCell.append(el('span', 'contrib-num pos', entry.composite.toFixed(2)));
-  totalRow.append(totalCell);
-  totalRow.append(el('td', 'param-why',
-    'Sum of the contributions above, bounded to 0–100.'));
-  tbody.append(totalRow);
+  const total = el('div', 'total-row');
+  total.append(el('span', null, 'Composite — sum of the contributions above, bounded 0–100'));
+  total.append(el('span', 'score-value', entry.composite.toFixed(2)));
+  wrap.append(total);
+  return wrap;
+}
 
-  table.append(tbody);
-  return table;
+function statusWord(status) {
+  return status === 'not_applicable' ? 'not applicable' : 'no data';
+}
+
+function whyContent(param, entry) {
+  const grid = el('div', 'param-drill-grid');
+  const main = el('div', 'param-drill-main');
+  const spec = specFor(param.param_key);
+  const dd = spec && spec.deep_dive;
+
+  main.append(el('p', 'lead', param.explanation || ''));
+
+  if (dd) {
+    main.append(el('h4', null, 'What it measures'));
+    main.append(el('p', null, dd.measures));
+    main.append(el('h4', null, 'What would change it'));
+    main.append(el('p', null, dd.changes));
+    main.append(el('h4', null, 'What the evidence says'));
+    main.append(el('p', null, dd.evidence));
+  } else if (spec) {
+    main.append(el('p', null, spec.summary));
+  }
+
+  grid.append(main);
+
+  const side = el('div', 'param-drill-side');
+  side.append(el('h4', null, 'The arithmetic'));
+  side.append(el('pre', 'param-math', arithmetic(param, entry)));
+  grid.append(side);
+  return grid;
+}
+
+/* Reconstructs the engine's own composition so the number is checkable.
+ *
+ *   stock layer:    scale x weight x signal x direction
+ *   options layer:  scale x weight x signal x conviction
+ *
+ * where scale = 100 / total counted weight.
+ *
+ * The options layer carries that extra conviction factor deliberately: a
+ * perfect contract on a stock with no directional signal must not manufacture
+ * a high score. Leaving it out of this panel would have shown figures that
+ * did not reconcile with the contribution beside them — which, on a view whose
+ * entire job is making the number checkable, is worse than showing nothing.
+ *
+ * effective_weight is the parameter's share after redistribution, so the scale
+ * is recovered from it rather than re-derived. If a parameter was excluded,
+ * this shows the denominator that actually applied. */
+function arithmetic(param, entry) {
+  if (param.status !== 'ok') {
+    const why = param.status === 'not_applicable'
+      ? 'not applicable here'
+      : 'not enough data yet';
+    return [
+      `excluded — ${why}`,
+      '',
+      `weight ${fmt(param.weight)} redistributed`,
+      'across the parameters that did',
+      'compute, so each carries a',
+      'slightly larger share.',
+    ].join('\n');
+  }
+
+  const share = param.effective_weight;
+  const counted = share > 0 ? (param.weight / share) * 100 : null;
+  const gated = param.layer === 'options';
+  const lines = [
+    `value      ${param.display_value}`,
+    `signal     ${fmt(param.signal, 3)}`,
+    `weight     ${fmt(param.weight)}`,
+  ];
+  if (counted) {
+    lines.push(`scale      100/${fmt(counted)}`);
+    if (gated) lines.push(`conviction ${fmt(entry.conviction, 3)}`);
+    lines.push('');
+    const factors = [
+      fmt(100 / counted, 3),
+      fmt(param.weight),
+      fmt(Math.abs(param.signal), 3),
+    ];
+    if (gated) factors.push(fmt(entry.conviction, 3));
+    lines.push(factors.join(' x '));
+  }
+  lines.push('');
+  lines.push(`= ${param.contribution >= 0 ? '+' : ''}${param.contribution.toFixed(2)}`);
+  lines.push(`  ${fmt(share, 1)}% of the score`);
+  if (gated) {
+    lines.push('');
+    lines.push('options contributions are');
+    lines.push('scaled by conviction, so a');
+    lines.push('good contract on a flat');
+    lines.push('stock cannot inflate this.');
+  }
+  return lines.join('\n');
+}
+
+function fmt(value, places = 1) {
+  if (value === null || value === undefined || Number.isNaN(value)) return '—';
+  return Number(value).toFixed(places);
 }
 
 function contributionCell(param, maxAbs) {
-  const cell = el('td', 'contrib-cell');
+  const cell = el('span', 'contrib-cell');
   if (param.status !== 'ok') {
-    cell.append(el('span', 'contrib-num zero', '—'));
+    cell.append(el('span', 'contrib-axis'));
+    cell.append(el('span', 'contrib-num', '—'));
     return cell;
   }
   const value = param.contribution || 0;
-  const bar = el('div', 'contrib-bar');
-  bar.append(el('div', 'contrib-axis'));
-  const fill = el('div', `contrib-fill ${value >= 0 ? 'pos' : 'neg'}`);
-  fill.style.width = `${(Math.abs(value) / maxAbs) * 50}%`;
-  bar.append(fill);
-  cell.append(bar);
+  const axis = el('span', 'contrib-axis');
+  const bar = el('span', `contrib-bar ${value >= 0 ? 'pos' : 'neg'}`);
+  bar.style.width = `${Math.min(100, (Math.abs(value) / maxAbs) * 100)}%`;
+  axis.append(bar);
+  cell.append(axis);
 
-  const cls = value > 0.005 ? 'pos' : (value < -0.005 ? 'neg' : 'zero');
+  const cls = value > 0.005 ? 'pos' : (value < -0.005 ? 'neg' : '');
   cell.append(el('span', `contrib-num ${cls}`,
     `${value >= 0 ? '+' : ''}${value.toFixed(2)}`));
   return cell;
