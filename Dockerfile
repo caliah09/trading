@@ -32,6 +32,20 @@ COPY screener/ ./screener/
 COPY scripts/ ./scripts/
 COPY pyproject.toml README.md ./
 
+# TEMPORARY TEST CREDENTIAL — REMOVE BEFORE THIS IS ANYTHING BUT A TEST.
+#
+# A baked-in default so a deploy comes up without the platform's environment
+# being configured first. It is a real scrypt hash, so the image does not carry
+# the password itself, but it is a hash of a password that is now permanently in
+# this repository's git history and is therefore shared with anyone who ever has
+# read access to the repo.
+#
+# An environment variable of the same name OVERRIDES this, which is the exit
+# path: set SCREENER_PASSWORD_HASH in the platform, confirm the login still
+# works, then delete these two lines. Until then, treat the deployed URL as
+# protected by a password that is not actually a secret.
+ENV SCREENER_PASSWORD_HASH=scrypt$6c97853193ffa1bfba07f989c02bef7d$94c4843d32877ee10fc46ef6cfbeaeb2000c403533a89558605fdb2da5cc25bb
+
 # Unprivileged user for the application process.
 #
 # The container deliberately STARTS as root so the entrypoint can take
