@@ -11,3 +11,9 @@ data/
 *.sqlite3
 *.db
 config.local.json
+
+# Environment files. SCREENER_PASSWORD_HASH and any broker API keys belong in
+# your host's environment or a local .env, never in the repository.
+.env
+.env.*
+!.env.example
