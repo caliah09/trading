@@ -94,6 +94,25 @@ and write the same SQLite file, which is how you corrupt it.
 `render.yaml` requests a 1 GB disk, which needs a paid instance type. Remove the
 `disk:` block to run free, and read the caveat above first.
 
+### Railway
+
+1. **New Project → Deploy from GitHub repo → your fork.**
+2. **Settings → Source → set the branch.** Railway defaults to the repository's
+   default branch; if yours is not `main`, set it explicitly or you will deploy
+   the wrong code — or nothing.
+3. **Add a Volume**, mount path `/data`.
+4. **Variables → `SCREENER_PASSWORD_HASH`** (or `SCREENER_PASSWORD`).
+5. **Settings → Networking → Generate Domain.**
+
+Railway assigns `$PORT` and terminates TLS, so nothing else needs configuring.
+
+> **You do not need `RAILWAY_RUN_UID=0`.** Railway's deploy diagnosis suggests
+> it when the healthcheck fails with `unable to open database file`, and it does
+> work — by running the whole container as root. The entrypoint handles the same
+> problem properly: it starts as root, takes ownership of the mounted volume,
+> then drops to an unprivileged user before starting the app. If you set that
+> variable during an earlier failed deploy, remove it.
+
 ### Plain Docker, anywhere
 
 ```bash
@@ -107,6 +126,23 @@ docker run -d -p 8765:8765 \
 Put it behind a reverse proxy that terminates TLS. For local testing over plain
 HTTP, add `-e SCREENER_INSECURE_COOKIE=1`, because a `Secure` cookie will not be
 sent over HTTP and sign-in will appear to silently fail.
+
+### Volume ownership, and why the container starts as root
+
+Chowning `/data` at build time is not enough. A platform that mounts a volume
+there replaces the directory with a fresh root-owned one, so the build-time
+ownership is irrelevant and an unprivileged process cannot create the database.
+It surfaces as `sqlite3.OperationalError: unable to open database file` — a
+message that names neither the path nor the cause.
+
+`docker-entrypoint.sh` therefore starts as root, takes ownership of whatever is
+mounted at the database's directory, and only then drops to the `screener` user
+with `setpriv` before exec'ing the app. **The application process is still
+unprivileged**; only the few milliseconds of setup are not.
+
+If a platform forces the container to start non-root, the entrypoint detects
+that and runs anyway, and the app's startup error explains exactly what it found
+— which user it is running as, who owns the directory, and what to change.
 
 ---
 

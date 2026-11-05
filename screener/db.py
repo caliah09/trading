@@ -170,6 +170,58 @@ CREATE INDEX IF NOT EXISTS idx_decisions_decided ON decisions(decided_at DESC);
 """
 
 
+class DatabaseUnwritable(RuntimeError):
+    """The database path cannot be created or opened for writing.
+
+    Raised instead of letting SQLite's bare "unable to open database file"
+    surface, because that message names neither the path nor the reason, and
+    the reason is nearly always a mounted volume the process does not own.
+    """
+
+    def __init__(self, path: Path, cause: Exception) -> None:
+        directory = path.parent
+        # These branches must stay distinct. Reporting "does not exist" for a
+        # directory that exists but could not be read would send you looking
+        # for the wrong problem — which is the entire failure mode this class
+        # exists to prevent.
+        try:
+            stat = directory.stat()
+            owner = f"uid {stat.st_uid}"
+            try:
+                import pwd
+
+                owner = pwd.getpwuid(stat.st_uid).pw_name
+            except (KeyError, ImportError):
+                pass
+            owner += f", mode {stat.st_mode & 0o777:o}"
+        except FileNotFoundError:
+            owner = "the directory does not exist"
+        except PermissionError:
+            owner = "unreadable — a parent directory denies access"
+        except OSError as stat_error:
+            owner = f"could not be inspected ({type(stat_error).__name__})"
+
+        try:
+            import os
+
+            running_as = f"uid {os.getuid()}"
+        except AttributeError:  # pragma: no cover - non-POSIX
+            running_as = "unknown"
+
+        super().__init__(
+            f"Cannot open the database at {path}.\n"
+            f"  Running as: {running_as}\n"
+            f"  {directory} is owned by: {owner}\n"
+            f"  Underlying error: {cause}\n\n"
+            "  In a container this almost always means a volume was mounted "
+            "over the directory, replacing the ownership set at build time. "
+            "The image's entrypoint fixes this when it starts as root; if the "
+            "platform forces a non-root user, either let the container start "
+            "as root or point SCREENER_DB at a writable path."
+        )
+        self.path = path
+
+
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -180,8 +232,19 @@ class Database:
     def __init__(self, path: Path | str = DEFAULT_DB_PATH) -> None:
         self.path = Path(path)
         if self.path.parent and str(self.path.parent) not in ("", "."):
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.initialize()
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+            except PermissionError as exc:
+                raise DatabaseUnwritable(self.path, exc) from exc
+        try:
+            self.initialize()
+        except sqlite3.OperationalError as exc:
+            # SQLite reports every one of these as "unable to open database
+            # file", which says nothing about the cause. In a container with a
+            # mounted volume it is almost always ownership.
+            if "unable to open database file" in str(exc):
+                raise DatabaseUnwritable(self.path, exc) from exc
+            raise
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:

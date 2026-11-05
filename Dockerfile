@@ -32,12 +32,19 @@ COPY screener/ ./screener/
 COPY scripts/ ./scripts/
 COPY pyproject.toml README.md ./
 
-# Unprivileged user, and a volume it can actually write to. SQLite needs write
-# access to the *directory* as well as the file, for its journal.
+# Unprivileged user for the application process.
+#
+# The container deliberately STARTS as root so the entrypoint can take
+# ownership of a mounted volume, then drops to this user before exec'ing the
+# app. Chowning /data here is not enough on its own: a platform that mounts a
+# volume at /data replaces this directory with a fresh root-owned one, and the
+# app then cannot create its database.
 RUN useradd --create-home --uid 10001 screener \
     && mkdir -p /data \
     && chown -R screener:screener /data /app
-USER screener
+
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 8765
 
@@ -50,4 +57,5 @@ f'http://127.0.0.1:{os.environ.get(\"PORT\", 8765)}/health', timeout=4).status =
 # --host 0.0.0.0 is required inside a container. The app refuses to start that
 # way unless SCREENER_PASSWORD_HASH is set, so a misconfigured deploy fails
 # loudly rather than coming up unprotected.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["python", "-m", "screener", "serve", "--host", "0.0.0.0"]

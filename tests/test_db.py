@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -268,3 +269,52 @@ def test_schema_survives_reopening(tmp_path):
 def test_creates_parent_directory(tmp_path):
     db = Database(tmp_path / "nested" / "deep" / "screener.sqlite")
     assert db.path.parent.exists()
+
+
+class TestUnwritableDatabase:
+    """A mounted volume the process does not own is the common deploy failure.
+
+    SQLite reports it as a bare "unable to open database file", naming neither
+    the path nor the cause, so it is translated into something diagnosable.
+    """
+
+    def test_missing_directory_is_reported_as_missing(self):
+        from screener.db import DatabaseUnwritable
+
+        message = str(DatabaseUnwritable(Path("/nonexistent-xyz/a.sqlite"), OSError("x")))
+        assert "does not exist" in message
+        assert "/nonexistent-xyz/a.sqlite" in message
+
+    def test_message_names_the_running_user_and_the_cause(self):
+        from screener.db import DatabaseUnwritable
+
+        message = str(DatabaseUnwritable(Path("/nonexistent-xyz/a.sqlite"),
+                                         OSError("Permission denied")))
+        assert "Running as" in message
+        assert "Permission denied" in message
+
+    def test_message_explains_the_volume_case(self):
+        from screener.db import DatabaseUnwritable
+
+        message = str(DatabaseUnwritable(Path("/data/a.sqlite"), OSError("x")))
+        assert "volume" in message
+        assert "SCREENER_DB" in message
+
+    def test_does_not_claim_missing_when_merely_unreadable(self, tmp_path, monkeypatch):
+        """Reporting 'does not exist' for an unreadable directory would send
+        you hunting the wrong problem."""
+        from screener.db import DatabaseUnwritable
+
+        target = tmp_path / "vol"
+        target.mkdir()
+
+        def deny(self):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(Path, "stat", deny)
+        message = str(DatabaseUnwritable(target / "a.sqlite", OSError("x")))
+        assert "does not exist" not in message
+        assert "denies access" in message
+
+    def test_a_writable_path_still_opens(self, tmp_path):
+        assert Database(tmp_path / "nested" / "ok.sqlite").path.exists()
