@@ -16,10 +16,12 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+
+from screener.auth import SESSION_COOKIE, AuthConfig, LoginThrottle
 
 from screener.config import (
     PRESET_DESCRIPTIONS,
@@ -54,6 +56,7 @@ def create_app(
     provider_name: str = "yfinance",
     start_scheduler: bool = True,
     catch_up: bool = True,
+    auth: AuthConfig | None = None,
 ) -> FastAPI:
     """Build the application.
 
@@ -61,9 +64,15 @@ def create_app(
         provider_name: ``yfinance`` for live data, ``synthetic`` for offline use.
         start_scheduler: disabled by tests so no background timer runs.
         catch_up: run a refresh at startup if a scheduled one was missed.
+        auth: when configured with a password, every route except the login
+            page and static assets requires a valid session. Defaults to
+            reading the environment, so a local run with nothing set stays
+            open exactly as before.
     """
     db = Database(db_path)
     service = RefreshService(db, provider_name=provider_name, catch_up=catch_up)
+    auth_config = auth if auth is not None else AuthConfig.from_env()
+    throttle = LoginThrottle()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -83,6 +92,80 @@ def create_app(
     )
     app.state.db = db
     app.state.service = service
+    app.state.auth = auth_config
+    app.state.throttle = throttle
+
+    # ---------------------------------------------------------------- auth
+
+    #: Reachable without a session. Everything else needs one when auth is on.
+    OPEN_PATHS = {"/login", "/api/login", "/health"}
+
+    @app.middleware("http")
+    async def require_session(request, call_next):
+        if not auth_config.enabled:
+            return await call_next(request)
+
+        path = request.url.path
+        if path in OPEN_PATHS or path.startswith("/static/"):
+            return await call_next(request)
+
+        token = request.cookies.get(SESSION_COOKIE, "")
+        if auth_config.validate(token):
+            return await call_next(request)
+
+        # A browser navigating should see the login page; an API caller should
+        # get a status code it can act on rather than a page of HTML.
+        if path.startswith("/api/"):
+            return JSONResponse({"detail": "Authentication required."}, status_code=401)
+        return RedirectResponse("/login", status_code=303)
+
+    @app.get("/health")
+    def health() -> dict:
+        """Unauthenticated liveness check for the host's health probe."""
+        return {"status": "ok", "auth": auth_config.enabled}
+
+    @app.get("/login")
+    def login_page() -> FileResponse:
+        if not auth_config.enabled:
+            return RedirectResponse("/", status_code=303)
+        return FileResponse(WEB_DIR / "login.html")
+
+    @app.post("/api/login")
+    async def login(request: Request, payload: dict[str, Any] = Body(...)) -> JSONResponse:
+        if not auth_config.enabled:
+            raise HTTPException(status_code=400, detail="Authentication is not configured.")
+
+        client = request.client.host if request.client else "unknown"
+        if throttle.blocked(client):
+            wait = throttle.retry_after(client)
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many failed attempts. Try again in {wait // 60 + 1} minute(s).",
+            )
+
+        if not auth_config.check(str(payload.get("password", ""))):
+            throttle.record_failure(client)
+            log.warning("Failed login attempt from %s", client)
+            raise HTTPException(status_code=401, detail="Incorrect password.")
+
+        throttle.record_success(client)
+        response = JSONResponse({"ok": True})
+        response.set_cookie(
+            SESSION_COOKIE,
+            auth_config.issue(),
+            max_age=auth_config.session_ttl,
+            httponly=True,              # unreachable from JavaScript
+            samesite="lax",
+            secure=auth_config.secure_cookie,
+            path="/",
+        )
+        return response
+
+    @app.post("/api/logout")
+    def logout() -> JSONResponse:
+        response = JSONResponse({"ok": True})
+        response.delete_cookie(SESSION_COOKIE, path="/")
+        return response
 
     # ---------------------------------------------------------------- meta
 

@@ -1,0 +1,52 @@
+# Fly.io deployment.
+#
+# Chosen for this over the alternatives because it gives the database a real
+# persistent volume. A SQLite file on an ephemeral filesystem is lost on every
+# restart, and with it the journal decisions — the only records here that
+# cannot be regenerated from market data.
+#
+#   fly launch --no-deploy
+#   fly volumes create screener_data --size 1
+#   fly secrets set SCREENER_PASSWORD_HASH='scrypt$...'
+#   fly deploy
+#
+# Fly terminates TLS, so cookies stay Secure and no override is needed.
+
+app = "screener"
+primary_region = "iad"          # close to US market data
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  SCREENER_DB = "/data/screener.sqlite"
+  PORT = "8765"
+
+[[mounts]]
+  source = "screener_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8765
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  # One machine only. Two would each run the internal scheduler and write the
+  # same SQLite file, which is how you corrupt it.
+  min_machines_running = 0
+
+  [http_service.http_options.response.headers]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "no-referrer"
+
+[[http_service.checks]]
+  grace_period = "20s"
+  interval = "60s"
+  method = "GET"
+  path = "/health"
+  timeout = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"              # scrypt needs 32MB per login; 256mb is tight

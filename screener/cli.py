@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from datetime import datetime, time
 from pathlib import Path
@@ -43,8 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
         prog="screener",
         description="Local-only personal stock/options screener.",
     )
-    parser.add_argument("--db", default=str(DEFAULT_DB_PATH), type=Path,
-                        help=f"SQLite database path (default: {DEFAULT_DB_PATH})")
+    parser.add_argument("--db", type=Path,
+                        default=Path(os.environ.get("SCREENER_DB", str(DEFAULT_DB_PATH))),
+                        help=f"SQLite database path. Honours $SCREENER_DB, which a "
+                             f"container sets to its mounted volume. "
+                             f"(default: {DEFAULT_DB_PATH})")
     parser.add_argument("--provider", default="yfinance", choices=("yfinance", "synthetic"),
                         help="Data source. 'synthetic' generates deterministic fake data "
                              "for offline use and demos.")
@@ -53,10 +57,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     serve = sub.add_parser("serve", help="Start the dashboard and its internal scheduler")
-    serve.add_argument("--host", default=DEFAULT_HOST,
-                       help="Bind address. Defaults to loopback; this app has no "
-                            "authentication, so do not bind it to a public interface.")
-    serve.add_argument("--port", type=int, default=DEFAULT_PORT)
+    serve.add_argument("--host", default=os.environ.get("SCREENER_HOST", DEFAULT_HOST),
+                       help="Bind address. Defaults to loopback. Binding anywhere "
+                            "else requires a password to be configured.")
+    serve.add_argument("--port", type=int,
+                       default=int(os.environ.get("PORT", DEFAULT_PORT)),
+                       help="Port to listen on. Honours $PORT, which hosting "
+                            "platforms assign.")
     serve.add_argument("--no-schedule", action="store_true",
                        help="Serve the dashboard without starting the internal scheduler")
     serve.add_argument("--no-catch-up", action="store_true",
@@ -66,6 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     refresh.add_argument("--json", action="store_true", help="Print the run summary as JSON")
 
     sub.add_parser("status", help="Show the last and next scheduled refresh")
+
+    sub.add_parser(
+        "hash-password",
+        help="Hash a password for SCREENER_PASSWORD_HASH (prompts; never echoes)",
+    )
 
     doctor = sub.add_parser(
         "doctor",
@@ -101,10 +113,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _configure_logging(args.verbose)
 
-    # `gate` only asks what time it is, so it must not create a database as a
-    # side effect — it runs before the database is restored in CI.
+    # Neither of these touches stored data, so neither should create a database
+    # as a side effect. `gate` in particular runs before one is restored in CI.
     if args.command == "gate":
         return _gate(args)
+    if args.command == "hash-password":
+        return _hash_password()
 
     db = Database(args.db)
 
@@ -125,14 +139,67 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+
+
+def _hash_password() -> int:
+    """Hash a password for the host's environment. Never echoes or stores it."""
+    import getpass
+
+    from screener.auth import hash_password
+
+    try:
+        password = getpass.getpass("Password: ")
+        again = getpass.getpass("Confirm:  ")
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled.", file=sys.stderr)
+        return 1
+
+    if password != again:
+        print("Passwords do not match.", file=sys.stderr)
+        return 1
+    if len(password) < 12:
+        print("Use at least 12 characters. This protects a URL anyone can reach.",
+              file=sys.stderr)
+        return 1
+
+    print("\nSet this in your host's environment:\n")
+    print(f"  SCREENER_PASSWORD_HASH={hash_password(password)}\n")
+    print("  The hash is not reversible, so the environment never holds a")
+    print("  password that works anywhere else. Changing it signs out every")
+    print("  existing session.\n")
+    return 0
+
+
 def _serve(args, db: Database) -> int:
     import uvicorn
 
     from screener.api.app import create_app
+    from screener.auth import AuthConfig
 
-    if args.host not in ("127.0.0.1", "localhost", "::1"):
-        print(f"WARNING: binding to {args.host}. This app has no authentication — "
-              "anyone who can reach that address can read and change your settings.",
+    auth = AuthConfig.from_env()
+    public = args.host not in LOOPBACK
+
+    # Refusing is deliberate rather than warning. This app reads your positions
+    # and can change your settings; an unauthenticated public bind is not a
+    # thing to let through with a message the operator may never see.
+    if public and not auth.enabled:
+        print(
+            "\n  REFUSING TO START\n\n"
+            f"  --host {args.host} exposes this beyond your own machine, and no\n"
+            "  password is configured. Anyone reaching that address could read\n"
+            "  your positions and change your settings.\n\n"
+            "  Set one first:\n\n"
+            "      python -m screener hash-password\n"
+            "      export SCREENER_PASSWORD_HASH='scrypt$...'\n\n"
+            "  Or bind to loopback instead (the default).\n",
+            file=sys.stderr,
+        )
+        return 2
+
+    if public and auth.secure_cookie:
+        print("  Session cookies are marked Secure, so sign-in needs HTTPS.\n"
+              "  Set SCREENER_INSECURE_COOKIE=1 only for plain-HTTP testing.",
               file=sys.stderr)
 
     app = create_app(
@@ -140,9 +207,12 @@ def _serve(args, db: Database) -> int:
         provider_name=args.provider,
         start_scheduler=not args.no_schedule,
         catch_up=not args.no_catch_up,
+        auth=auth,
     )
-    print(f"\n  Screener dashboard: http://{args.host}:{args.port}\n"
+    shown = "0.0.0.0" if args.host == "0.0.0.0" else args.host
+    print(f"\n  Screener dashboard: http://{shown}:{args.port}\n"
           f"  Data source: {args.provider}   Database: {args.db}\n"
+          f"  Authentication: {'on' if auth.enabled else 'off (loopback only)'}\n"
           f"  Automatic refreshes run at market open and close *while this process is running*.\n")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0

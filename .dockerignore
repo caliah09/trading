@@ -1,0 +1,18 @@
+# Never bake local state or secrets into the image.
+data/
+*.sqlite
+*.sqlite3
+*.db
+config.local.json
+.env
+
+.git/
+.github/
+tests/
+docs/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/

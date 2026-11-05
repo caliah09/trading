@@ -1,0 +1,30 @@
+# Render deployment.
+#
+# Note before using this: Render's free tier spins a service down after about
+# 15 minutes idle and does not provide a persistent disk. Without a disk the
+# SQLite database — including your journal decisions — is lost on every
+# restart, and a sleeping service never fires its internal scheduler.
+#
+# The disk below therefore requires a paid instance type. If you would rather
+# stay free, drop the `disk` block and rely on the GitHub Actions refresh for
+# data, accepting that decisions recorded in the hosted app will not survive.
+#
+# Set SCREENER_PASSWORD_HASH in the dashboard, not here. Secrets do not belong
+# in a file that is committed.
+
+services:
+  - type: web
+    name: screener
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter               # a disk is not available on the free plan
+    healthCheckPath: /health
+    envVars:
+      - key: SCREENER_DB
+        value: /data/screener.sqlite
+      - key: SCREENER_PASSWORD_HASH
+        sync: false             # set it in the dashboard
+    disk:
+      name: screener-data
+      mountPath: /data
+      sizeGB: 1

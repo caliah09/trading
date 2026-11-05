@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in — Screener</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232a78d6'/%3E%3Cpath d='M3 11.5l3-3 2.5 2L13 5' stroke='white' stroke-width='1.8' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+  <style>
+    body { display: grid; place-items: center; min-height: 100vh; margin: 0; }
+    .login-card {
+      background: var(--surface-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 2rem;
+      width: min(380px, calc(100vw - 2rem));
+    }
+    .login-card h1 { font-size: 1.15rem; margin: 0 0 0.3rem; }
+    .login-card p.sub { margin: 0 0 1.4rem; color: var(--text-secondary); font-size: 0.85rem; }
+    .login-card label { display: block; font-size: 0.8rem; font-weight: 600; margin-bottom: 0.3rem; }
+    .login-card input {
+      width: 100%; padding: 0.6rem 0.7rem; font: inherit; font-size: 0.95rem;
+      background: var(--surface-0); color: var(--text-primary);
+      border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+    }
+    .login-card button { width: 100%; margin-top: 1rem; padding: 0.65rem; }
+    .login-error {
+      margin-top: 0.9rem; font-size: 0.82rem; color: var(--neg);
+      border-left: 3px solid var(--neg); padding-left: 0.6rem;
+    }
+    .login-note {
+      margin-top: 1.4rem; font-size: 0.74rem; color: var(--text-muted);
+      border-top: 1px solid var(--border); padding-top: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <main class="login-card">
+    <h1>Stock &amp; Options Screener</h1>
+    <p class="sub">This instance is password protected.</p>
+
+    <form id="login-form" autocomplete="on">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password"
+             autocomplete="current-password" required autofocus>
+      <button type="submit" class="btn-primary" id="submit">Sign in</button>
+    </form>
+
+    <p class="login-error" id="error" hidden></p>
+
+    <p class="login-note">
+      A personal research tool, not financial advice. Nothing here is a
+      recommendation to buy or sell any security.
+    </p>
+  </main>
+
+  <script>
+    const form = document.getElementById('login-form');
+    const error = document.getElementById('error');
+    const submit = document.getElementById('submit');
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      error.hidden = true;
+      submit.disabled = true;
+      submit.textContent = 'Signing in…';
+
+      try {
+        const response = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: document.getElementById('password').value }),
+        });
+        if (response.ok) {
+          window.location.href = '/';
+          return;
+        }
+        const body = await response.json().catch(() => ({}));
+        error.textContent = body.detail || 'Sign in failed.';
+        error.hidden = false;
+      } catch (err) {
+        error.textContent = 'Could not reach the server.';
+        error.hidden = false;
+      } finally {
+        submit.disabled = false;
+        submit.textContent = 'Sign in';
+        document.getElementById('password').select();
+      }
+    });
+  </script>
+</body>
+</html>

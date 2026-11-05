@@ -323,8 +323,32 @@ called out rather than buried.
    (national days of mourning, weather) are not modelled; worst case is one
    wasted fetch.
 
-6. **No authentication.** The app binds to `127.0.0.1` and has no login. Do not
-   bind it to a public interface — `serve --host` warns if you try.
+6. **Authentication is opt-in, and enforced when it matters.** Bound to
+   `127.0.0.1` the app has no login, because only your own machine can reach
+   it. Binding anywhere else **requires** a password — `serve` refuses to start
+   otherwise rather than warning and continuing. See
+   [docs/hosting.md](docs/hosting.md).
+
+---
+
+## Hosting it
+
+The dashboard needs a running Python process, so it cannot be served as static
+files. To reach it from another device, deploy the container:
+
+```bash
+python -m screener hash-password          # prints SCREENER_PASSWORD_HASH=...
+docker build -t screener .
+docker run -d -p 8765:8765 \
+  -e SCREENER_PASSWORD_HASH='scrypt$...' \
+  -v screener-data:/data screener
+```
+
+`Dockerfile`, `fly.toml` and `render.yaml` are in the repository.
+**[docs/hosting.md](docs/hosting.md)** covers choosing a host, the persistent
+storage the database needs, what the login does and does not protect against,
+and the realistic cost — free tiers have narrowed, and an always-on instance
+with a volume is roughly $5/month.
 
 ---
 

@@ -442,3 +442,129 @@ class TestCalibration:
 
     def test_rejects_an_absurd_horizon(self, client):
         assert client.get("/api/calibration?horizon_days=9999").status_code == 422
+
+
+# ==========================================================================
+# Authentication over HTTP
+# ==========================================================================
+
+AUTH_PASSWORD = "a sufficiently long password"
+
+
+@pytest.fixture
+def secured_client(tmp_path):
+    """A client whose app requires a password."""
+    from screener.api.app import create_app
+    from screener.auth import AuthConfig, hash_password
+
+    app = create_app(
+        db_path=tmp_path / "secured.sqlite",
+        provider_name="synthetic",
+        start_scheduler=False,
+        catch_up=False,
+        auth=AuthConfig.from_env({
+            "SCREENER_PASSWORD_HASH": hash_password(AUTH_PASSWORD),
+            "SCREENER_INSECURE_COOKIE": "1",
+        }),
+    )
+    with TestClient(app) as client:
+        yield client
+
+
+class TestAuthDisabled:
+    def test_local_run_stays_open(self, client):
+        """With no password set, nothing changes for a loopback run."""
+        assert client.get("/api/status").status_code == 200
+
+    def test_health_reports_auth_off(self, client):
+        assert client.get("/health").json()["auth"] is False
+
+    def test_login_redirects_when_unconfigured(self, client):
+        response = client.get("/login", follow_redirects=False)
+        assert response.status_code == 303
+
+
+class TestAuthEnforced:
+    def test_api_requires_a_session(self, secured_client):
+        response = secured_client.get("/api/status")
+        assert response.status_code == 401
+        assert "Authentication required" in response.json()["detail"]
+
+    def test_every_data_route_is_protected(self, secured_client):
+        for path in ("/api/rankings/latest", "/api/config", "/api/decisions",
+                     "/api/calibration", "/api/presets", "/api/meta"):
+            assert secured_client.get(path).status_code == 401, path
+
+    def test_refresh_is_protected(self, secured_client):
+        assert secured_client.post("/api/refresh").status_code == 401
+
+    def test_config_writes_are_protected(self, secured_client):
+        assert secured_client.put("/api/config", json={}).status_code == 401
+
+    def test_browser_navigation_redirects_to_login(self, secured_client):
+        response = secured_client.get("/", follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"] == "/login"
+
+    def test_health_stays_open(self, secured_client):
+        """The host's probe runs without credentials."""
+        response = secured_client.get("/health")
+        assert response.status_code == 200
+        assert response.json()["auth"] is True
+
+    def test_login_page_is_reachable(self, secured_client):
+        response = secured_client.get("/login")
+        assert response.status_code == 200
+        assert "password" in response.text.lower()
+
+    def test_static_assets_stay_open(self, secured_client):
+        """The login page needs its stylesheet before anyone is signed in."""
+        assert secured_client.get("/static/styles.css").status_code == 200
+
+
+class TestLogin:
+    def test_correct_password_grants_access(self, secured_client):
+        response = secured_client.post("/api/login", json={"password": AUTH_PASSWORD})
+        assert response.status_code == 200
+        assert secured_client.get("/api/status").status_code == 200
+
+    def test_session_cookie_is_httponly(self, secured_client):
+        response = secured_client.post("/api/login", json={"password": AUTH_PASSWORD})
+        cookie_header = response.headers.get("set-cookie", "")
+        assert "httponly" in cookie_header.lower()
+        assert "samesite=lax" in cookie_header.lower()
+
+    def test_wrong_password_is_rejected(self, secured_client):
+        response = secured_client.post("/api/login", json={"password": "nope"})
+        assert response.status_code == 401
+        assert secured_client.get("/api/status").status_code == 401
+
+    def test_empty_password_is_rejected(self, secured_client):
+        assert secured_client.post("/api/login", json={"password": ""}).status_code == 401
+
+    def test_missing_password_is_rejected(self, secured_client):
+        assert secured_client.post("/api/login", json={}).status_code == 401
+
+    def test_logout_ends_the_session(self, secured_client):
+        secured_client.post("/api/login", json={"password": AUTH_PASSWORD})
+        assert secured_client.get("/api/status").status_code == 200
+        secured_client.post("/api/logout")
+        assert secured_client.get("/api/status").status_code == 401
+
+    def test_a_forged_cookie_is_rejected(self, secured_client):
+        secured_client.cookies.set("screener_session", "forged.token")
+        assert secured_client.get("/api/status").status_code == 401
+
+    def test_brute_force_is_throttled(self, secured_client):
+        """A single-password login on a public URL must not be guessable."""
+        statuses = [
+            secured_client.post("/api/login", json={"password": f"guess{i}"}).status_code
+            for i in range(12)
+        ]
+        assert 429 in statuses, "no throttling kicked in"
+        # Throttling must hold even once the right password is offered.
+        assert secured_client.post(
+            "/api/login", json={"password": AUTH_PASSWORD}).status_code == 429
+
+    def test_login_is_unavailable_when_auth_is_off(self, client):
+        assert client.post("/api/login", json={"password": "x"}).status_code == 400
