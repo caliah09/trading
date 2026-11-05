@@ -20,8 +20,25 @@ APP_USER=screener
 DB_PATH="${SCREENER_DB:-/data/screener.sqlite}"
 DATA_DIR="$(dirname "$DB_PATH")"
 
+# Print what the container can see BEFORE anything is able to fail.
+#
+# A platform reports a startup failure as "service unavailable" with no
+# explanation, and the three things that actually cause it — no password, an
+# unwritable volume, an unexpected port — are all visible here in one line.
+# Without this you are reduced to guessing from the outside.
+if [ -n "$SCREENER_PASSWORD_HASH" ]; then
+    AUTH="hash set"
+elif [ -n "$SCREENER_PASSWORD" ]; then
+    AUTH="plaintext set"
+else
+    AUTH="MISSING - the app will refuse to start on a public address"
+fi
+
+echo "screener: uid=$(id -u) port=${PORT:-unset (defaults to 8765)} db=$DB_PATH password=$AUTH"
+
 if [ "$(id -u)" = "0" ]; then
     mkdir -p "$DATA_DIR"
+    echo "screener: $DATA_DIR exists, taking ownership for $APP_USER"
     # SQLite needs write access to the directory as well as the file, for its
     # journal and WAL sidecars.
     chown -R "$APP_USER:$APP_USER" "$DATA_DIR" 2>/dev/null || {
