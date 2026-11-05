@@ -44,6 +44,7 @@
       <button class="tab" data-view="history" role="tab" aria-selected="false">History</button>
       <button class="tab" data-view="journal" role="tab" aria-selected="false">Journal</button>
       <button class="tab" data-view="settings" role="tab" aria-selected="false">Settings</button>
+      <button class="tab" data-view="learn" role="tab" aria-selected="false">Learn</button>
     </nav>
   </header>
 
@@ -89,6 +90,25 @@
         that produced them.
       </p>
       <div id="settings-body"><p class="empty">Loading settings…</p></div>
+    </section>
+
+    <!-- --------------------------------------------------------- Learn -->
+    <section id="view-learn" class="view">
+      <h2>Learn</h2>
+      <p class="view-intro">
+        Every term this app puts on screen, explained without assuming you have met it
+        before. Each entry says what it means in plain words, adds the precise version
+        underneath, and names where on the dashboard you will run into it.
+      </p>
+
+      <div class="learn-search field">
+        <label for="learn-filter">Search</label>
+        <input id="learn-filter" type="search" placeholder="delta, expiry, strike, sizing…"
+               autocomplete="off">
+        <p class="hint" id="learn-count"></p>
+      </div>
+
+      <div id="learn-body"><p class="empty">Loading…</p></div>
     </section>
   </main>
 

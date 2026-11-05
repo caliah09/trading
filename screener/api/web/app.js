@@ -17,6 +17,7 @@ const state = {
   ranking: null,
   config: null,
   historyRunId: null,
+  glossary: null,
 };
 
 /* ----------------------------------------------------------- utilities */
@@ -1210,6 +1211,91 @@ async function triggerRefresh() {
 
 /* ---------------------------------------------------------------- init */
 
+/* ----------------------------------------------------------------- learn */
+
+/* The Learn tab. Static content from /api/glossary, fetched once and filtered
+ * in the browser — a search that round-trips to the server for a 29-entry
+ * glossary would be slower and no more correct.
+ *
+ * Entries are grouped in teaching order rather than alphabetically. Someone
+ * who does not know what an option is needs "expiry is a deadline, not a
+ * payday" before they need "theta", and an A-Z list buries that. */
+
+async function loadGlossary() {
+  if (state.glossary) { renderGlossary(); return; }
+  try {
+    const data = await api('/api/glossary');
+    state.glossary = data.categories || [];
+  } catch (err) {
+    $('#learn-body').textContent = '';
+    $('#learn-body').append(el('p', 'empty', `Could not load: ${err.message}`));
+    return;
+  }
+  renderGlossary();
+}
+
+function renderGlossary() {
+  const body = $('#learn-body');
+  const filter = ($('#learn-filter').value || '').trim().toLowerCase();
+  body.textContent = '';
+
+  let shown = 0;
+  (state.glossary || []).forEach((group) => {
+    const matches = (group.entries || []).filter((e) => matchesFilter(e, filter));
+    if (!matches.length) return;
+
+    const section = el('section', 'learn-group');
+    section.append(el('h3', 'learn-group-title', group.label));
+    if (!filter) section.append(el('p', 'learn-group-blurb', group.blurb));
+    matches.forEach((e) => { section.append(glossaryCard(e)); shown += 1; });
+    body.append(section);
+  });
+
+  const count = $('#learn-count');
+  if (!shown) {
+    body.append(el('p', 'empty', `Nothing matches “${filter}”.`));
+    count.textContent = '';
+  } else {
+    count.textContent = filter
+      ? `${shown} ${shown === 1 ? 'entry' : 'entries'} matching “${filter}”`
+      : '';
+  }
+}
+
+function matchesFilter(entry, filter) {
+  if (!filter) return true;
+  const haystack = [
+    entry.term, entry.plain, entry.detail, entry.seen_in, entry.caution,
+    ...(entry.aka || []),
+  ].join(' ').toLowerCase();
+  return haystack.includes(filter);
+}
+
+function glossaryCard(entry) {
+  const card = el('article', 'learn-card');
+
+  const head = el('div', 'learn-card-head');
+  head.append(el('h4', null, entry.term));
+  (entry.aka || []).forEach((alias) => head.append(el('span', 'badge', alias)));
+  card.append(head);
+
+  card.append(el('p', 'learn-plain', entry.plain));
+  if (entry.detail) card.append(el('p', 'learn-detail', entry.detail));
+
+  if (entry.caution) {
+    const warn = el('p', 'note note-warn', entry.caution);
+    card.append(warn);
+  }
+
+  if (entry.seen_in) {
+    const where = el('p', 'learn-where');
+    where.append(el('span', 'learn-where-label', 'Where you see it'));
+    where.append(document.createTextNode(` ${entry.seen_in}`));
+    card.append(where);
+  }
+  return card;
+}
+
 function switchView(name) {
   document.querySelectorAll('.tab').forEach((tab) => {
     const active = tab.dataset.view === name;
@@ -1222,6 +1308,7 @@ function switchView(name) {
   if (name === 'history') loadHistory();
   if (name === 'journal') loadJournal();
   if (name === 'settings') loadSettings();
+  if (name === 'learn') loadGlossary();
 }
 
 function init() {
@@ -1229,6 +1316,7 @@ function init() {
     tab.addEventListener('click', () => switchView(tab.dataset.view));
   });
   $('#refresh-btn').addEventListener('click', triggerRefresh);
+  $('#learn-filter').addEventListener('input', renderGlossary);
   $('#detail-close').addEventListener('click', closeDetail);
   $('#detail-overlay').addEventListener('click', (event) => {
     if (event.target.id === 'detail-overlay') closeDetail();

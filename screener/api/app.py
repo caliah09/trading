@@ -32,6 +32,7 @@ from screener.config import (
 )
 from screener.db import DEFAULT_DB_PATH, Database
 from screener.journal import DEFAULT_HORIZON, calibrate
+from screener.glossary import by_category as glossary_by_category
 from screener.param_docs import deep_dive
 from screener.param_specs import ALL_SPECS
 from screener.universe import UNIVERSE_NAMES
@@ -201,6 +202,15 @@ def create_app(
                 for name in UNIVERSE_NAMES
             ],
         }
+
+    @app.get("/api/glossary")
+    def glossary() -> dict:
+        """Plain-language explanations of everything the app puts on screen.
+
+        Static content, so it is cheap to serve and the Learn tab needs no
+        further requests once loaded.
+        """
+        return {"categories": glossary_by_category()}
 
     @app.get("/api/status")
     def status() -> dict:

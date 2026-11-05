@@ -965,3 +965,86 @@ main { padding: 22px 28px 56px; }
 @media (prefers-reduced-motion: reduce) {
   .param-caret { transition: none; }
 }
+
+/* ---------------------------------------------------------------- learn */
+
+.learn-search {
+  max-width: 420px;
+  margin-bottom: 26px;
+}
+
+.learn-group { margin-bottom: 34px; }
+
+.learn-group-title {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.learn-group-blurb {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--faint);
+}
+
+/* A readable measure matters more here than filling the window: these are
+   paragraphs to read, not figures to scan, and a 1400px line is punishing. */
+.learn-card {
+  max-width: 82ch;
+  padding: 18px 20px;
+  margin-bottom: 11px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+}
+
+.learn-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 10px;
+}
+
+.learn-card-head h4 {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 650;
+  letter-spacing: -0.2px;
+}
+
+/* The plain definition is the one that has to land, so it is the one that
+   gets the size and the contrast. The precise version sits underneath. */
+.learn-plain {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--dim);
+}
+
+.learn-detail {
+  margin: 12px 0 0;
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--muted);
+}
+
+.learn-where {
+  margin: 13px 0 0;
+  padding-top: 11px;
+  border-top: 1px solid var(--border-soft);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--faint);
+}
+
+.learn-where-label {
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  font-size: 10px;
+  color: var(--faint);
+}
+
+.learn-card .note { margin-top: 13px; }
